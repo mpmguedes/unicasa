@@ -1045,6 +1045,13 @@ HTML_TEMPLATE = """
         .badge-source { font-size: 0.7rem; font-weight: 600; padding: 0.35rem 0.65rem; border-radius: 20px; }
         .badge-imovirtual { background: #fef3c7; color: #92400e; }
         .badge-custojusto { background: #dbeafe; color: #1e40af; }
+        .badge-housinganywhere { background: #d1fae5; color: #065f46; }
+        .badge-spotahome { background: #fce7f3; color: #9d174d; }
+        .badge-uniplaces { background: #dcfce7; color: #166534; }
+        .badge-erasmusinn { background: #f3e8ff; color: #6b21a8; }
+        .badge-demo { background: #f3e8ff; color: #6b21a8; }
+        .badge-imovirtual { background: #fef3c7; color: #92400e; }
+        .badge-custojusto { background: #dbeafe; color: #1e40af; }
         .badge-uniplaces { background: #dcfce7; color: #166534; }
         .badge-erasmusinn { background: #f3e8ff; color: #6b21a8; }
         .badge-demo { background: #f3e8ff; color: #6b21a8; }
