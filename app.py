@@ -913,56 +913,75 @@ def carregar_anuncios(cidade):
         return cache["anuncios"], cache["fonte"]
 
     print(f"[Cache] Atualizando dados para {cidade}...")
-    todas_fontes = []
+    fontes_dict = {}   # fonte_nome -> lista de anuncios
     fontes_ativas = []
 
     # Fonte 1: Imovirtual (mais confiavel)
     print(f"[Scraping] A tentar Imovirtual (ate {MAX_PAGES} paginas)...")
     imovirtual = fetch_imovirtual_todas_paginas(cidade)
     if imovirtual:
-        todas_fontes.extend(imovirtual)
+        fontes_dict["Imovirtual"] = imovirtual
         fontes_ativas.append(f"Imovirtual ({len(imovirtual)})")
 
-    # Fonte 2: CustoJusto (via Playwright)
+    # Fonte 2: CustoJusto (via JSON Next.js)
     print(f"[Scraping] A tentar CustoJusto...")
-    cj = fetch_custojusto_scraping(cidade, max_anuncios=20)
+    cj = fetch_custojusto_scraping(cidade, max_anuncios=40)
     if cj:
-        todas_fontes.extend(cj)
+        fontes_dict["CustoJusto"] = cj
         fontes_ativas.append(f"CustoJusto ({len(cj)})")
 
     # Fonte 3: HousingAnywhere
     print(f"[Scraping] A tentar HousingAnywhere...")
     ha = fetch_housinganywhere(cidade, max_anuncios=20)
     if ha:
-        todas_fontes.extend(ha)
+        fontes_dict["HousingAnywhere"] = ha
         fontes_ativas.append(f"HousingAnywhere ({len(ha)})")
 
     # Fonte 4: Spotahome
     print(f"[Scraping] A tentar Spotahome...")
     sp = fetch_spotahome(cidade, max_anuncios=20)
     if sp:
-        todas_fontes.extend(sp)
+        fontes_dict["Spotahome"] = sp
         fontes_ativas.append(f"Spotahome ({len(sp)})")
 
     # Fallback para demo
-    if not todas_fontes:
+    if not fontes_dict:
         print(f"[Fallback] Todas as fontes falharam. A usar dados de demonstracao.")
-        todas_fontes = get_demo_data(cidade)
+        fontes_dict["Demo"] = get_demo_data(cidade)
         fontes_ativas = ["Dados de demonstracao"]
 
-    # Remove duplicados por link ou titulo
-    vistos = set()
-    unicos = []
-    for a in todas_fontes:
-        key = a.get("link", "") or a.get("titulo", "")
-        if key and key not in vistos:
-            vistos.add(key)
-            unicos.append(a)
+    # Remove duplicados DENTRO de cada fonte
+    for fonte_nome, lista in fontes_dict.items():
+        vistos = set()
+        unicos = []
+        for a in lista:
+            key = a.get("link", "") or a.get("titulo", "")
+            if key and key not in vistos:
+                vistos.add(key)
+                unicos.append(a)
+        fontes_dict[fonte_nome] = unicos
+
+    # INTERLEAVE round-robin: misturar fontes 1-a-1 para nao ficar tudo de uma fonte junto
+    todas_fontes = []
+    nomes_fontes = list(fontes_dict.keys())
+    indices = {nome: 0 for nome in nomes_fontes}
+
+    while True:
+        algum_adicionado = False
+        for nome in nomes_fontes:
+            lista = fontes_dict[nome]
+            idx = indices[nome]
+            if idx < len(lista):
+                todas_fontes.append(lista[idx])
+                indices[nome] = idx + 1
+                algum_adicionado = True
+        if not algum_adicionado:
+            break
 
     fonte_str = " + ".join(fontes_ativas)
-    CACHE[cidade] = {"anuncios": unicos, "timestamp": agora, "fonte": fonte_str}
-    print(f"[Cache] {cidade}: {len(unicos)} anuncios unicos | Fontes: {fonte_str}")
-    return unicos, fonte_str
+    CACHE[cidade] = {"anuncios": todas_fontes, "timestamp": agora, "fonte": fonte_str}
+    print(f"[Cache] {cidade}: {len(todas_fontes)} anuncios unicos | Fontes: {fonte_str}")
+    return todas_fontes, fonte_str
 
 
 # =============================================================================
