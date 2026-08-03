@@ -490,6 +490,123 @@ def fetch_imovirtual_todas_paginas(cidade):
 # =============================================================================
 
 def fetch_custojusto_scraping(cidade, max_anuncios=25):
+    """Usa Playwright Stealth para scraping do CustoJusto.pt (site React/Next.js)."""
+    try:
+        from playwright.sync_api import sync_playwright
+        from playwright_stealth import stealth_sync
+    except ImportError:
+        print("[Playwright] Nao instalado. Ignorando CustoJusto.")
+        return []
+
+    slug = cidade.lower()
+    url = f"https://www.custojusto.pt/{slug}/imobiliario/arrendar-quartos"
+    anuncios = []
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1366, "height": 768},
+                locale="pt-PT",
+                timezone_id="Europe/Lisbon",
+            )
+            page = context.new_page()
+            stealth_sync(page)
+            print(f"[Playwright] A navegar para CustoJusto {cidade}...")
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(4000)  # Esperar React renderizar
+
+            # Scroll para carregar mais
+            for _ in range(3):
+                page.evaluate("window.scrollBy(0, 1000)")
+                page.wait_for_timeout(1000)
+
+            html = page.content()
+            browser.close()
+
+        soup = BeautifulSoup(html, "lxml")
+        zonas_cidade = ZONAS.get(cidade, {})
+
+        # Procurar links de anuncios
+        links = soup.find_all("a", href=re.compile(r"/anuncio/|/a/|/quarto-"), limit=max_anuncios)
+        if not links:
+            links = soup.find_all("a", href=True, limit=max_anuncios * 2)
+            # Filtrar so links que parecem anuncios
+            links = [a for a in links if "/" in a.get("href", "") and len(a.get_text(strip=True)) > 10]
+            links = links[:max_anuncios]
+
+        for a_tag in links:
+            try:
+                titulo = a_tag.get_text(strip=True)
+                if not titulo or len(titulo) < 5:
+                    continue
+                href = a_tag.get("href", "")
+                if href.startswith("/"):
+                    link = "https://www.custojusto.pt" + href
+                elif href.startswith("http"):
+                    link = href
+                else:
+                    link = "https://www.custojusto.pt/" + href
+
+                # Procurar preco no parent
+                parent = a_tag.find_parent("div", recursive=True)
+                preco = None
+                if parent:
+                    for sp in parent.find_all("span"):
+                        txt = sp.get_text(strip=True)
+                        if "€" in txt:
+                            preco = extrair_preco(txt)
+                            if preco and 50 < preco < 5000:
+                                break
+
+                if preco is None:
+                    # Tentar no proprio texto
+                    preco = extrair_preco(titulo)
+                    if not preco or preco < 50:
+                        continue
+
+                local = cidade
+                if parent:
+                    for sp in parent.find_all("span"):
+                        txt = sp.get_text(strip=True)
+                        if any(z.lower() in txt.lower() for z in zonas_cidade):
+                            local = txt
+                            break
+
+                zona = determinar_zona(titulo, local, cidade)
+                if not zona:
+                    for z in zonas_cidade:
+                        if z.lower() in local.lower():
+                            zona = z
+                            break
+
+                lat, lon = None, None
+                if zona and zona in zonas_cidade:
+                    zd = zonas_cidade[zona]
+                    lat, lon = zd["lat"], zd["lon"]
+
+                anuncios.append({
+                    "titulo": titulo,
+                    "preco": preco,
+                    "descricao": local,
+                    "link": link,
+                    "data": datetime.now().strftime("%Y-%m-%d"),
+                    "disponivel": None,
+                    "lat": lat,
+                    "lon": lon,
+                    "zona": zona,
+                    "fonte": "CustoJusto",
+                })
+            except Exception:
+                continue
+
+        print(f"[Playwright] CustoJusto {cidade}: {len(anuncios)} anuncios")
+        return anuncios
+
+    except Exception as e:
+        print(f"[Playwright] Erro CustoJusto {cidade}: {e}")
+        return []
     """Faz scraping do CustoJusto.pt para quartos."""
     slug = cidade.lower()
     url = f"https://www.custojusto.pt/imoveis/arrendar-quartos?ps=60&cg=1020&w=117&st=s&cs={slug}"
