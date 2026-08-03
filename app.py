@@ -1443,12 +1443,14 @@ def api_anuncios():
 # MAIN
 # =============================================================================
 if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 5000))
     print("=" * 60)
     print("  UniCasa - Agregador de Quartos para Estudantes")
     print("  Cidades: Porto | Lisboa | Coimbra")
     print("=" * 60)
     print(f"  Faculdades: {sum(len(v) for v in CIDADES.values())} (total)")
     print(f"  Zonas: {sum(len(v) for v in ZONAS.values())} (total)")
-    print(f"  URL: http://127.0.0.1:5000")
+    print(f"  URL: http://0.0.0.0:{port}")
     print("=" * 60)
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
