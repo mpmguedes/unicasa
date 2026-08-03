@@ -481,8 +481,104 @@ def fetch_imovirtual_todas_paginas(cidade):
         todos.extend(anuncios)
         print(f"[Scraping] Pagina {pagina}: {len(anuncios)} anuncios")
         if pagina < MAX_PAGES:
-            time.sleep(1.5)  # Respeitar o servidor
+            time.sleep(0.5)  # Respeitar o servidor
     return todos
+
+
+# =============================================================================
+# WEB SCRAPING - CUSTOJUSTO (outra fonte de anuncios)
+# =============================================================================
+
+def fetch_custojusto_scraping(cidade, max_anuncios=25):
+    """Faz scraping do CustoJusto.pt para quartos."""
+    slug = cidade.lower()
+    url = f"https://www.custojusto.pt/imoveis/arrendar-quartos?ps=60&cg=1020&w=117&st=s&cs={slug}"
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept-Language": "pt-PT,pt;q=0.9",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+        anuncios = []
+        zonas_cidade = ZONAS.get(cidade, {})
+
+        # CustoJusto: cada anuncio e um div com classe "container_related"
+        items = soup.find_all("div", {"class": "container_related"}, limit=max_anuncios)
+        if not items:
+            items = soup.find_all("article", limit=max_anuncios)
+
+        for item in items:
+            try:
+                # Titulo
+                title_tag = item.find("h2") or item.find("a", class_=re.compile(r"title"))
+                if not title_tag:
+                    title_tag = item.find("a")
+                titulo = title_tag.get_text(strip=True) if title_tag else f"Quarto em {cidade}"
+
+                # Link
+                link = ""
+                a_tag = item.find("a", href=True)
+                if a_tag:
+                    href = a_tag["href"]
+                    if href.startswith("/"):
+                        link = "https://www.custojusto.pt" + href
+                    else:
+                        link = href
+
+                # Preco
+                preco = None
+                for sp in item.find_all("span"):
+                    txt = sp.get_text(strip=True)
+                    if "€" in txt:
+                        preco = extrair_preco(txt)
+                        if preco:
+                            break
+                if preco is None:
+                    continue
+
+                # Local
+                local = cidade
+                for sp in item.find_all("span"):
+                    txt = sp.get_text(strip=True)
+                    if any(z.lower() in txt.lower() for z in zonas_cidade):
+                        local = txt
+                        break
+
+                zona = determinar_zona(titulo, local, cidade)
+                if not zona:
+                    for z in zonas_cidade:
+                        if z.lower() in local.lower():
+                            zona = z
+                            break
+
+                lat, lon = None, None
+                if zona and zona in zonas_cidade:
+                    zd = zonas_cidade[zona]
+                    lat, lon = zd["lat"], zd["lon"]
+
+                anuncios.append({
+                    "titulo": titulo,
+                    "preco": preco,
+                    "descricao": local,
+                    "link": link,
+                    "data": datetime.now().strftime("%Y-%m-%d"),
+                    "disponivel": None,
+                    "lat": lat,
+                    "lon": lon,
+                    "zona": zona,
+                    "fonte": "CustoJusto",
+                })
+            except Exception:
+                continue
+        print(f"[Scraping] CustoJusto {cidade}: {len(anuncios)} anuncios")
+        return anuncios
+    except Exception as e:
+        print(f"[Scraping] Erro CustoJusto {cidade}: {e}")
+        return []
 
 
 # =============================================================================
@@ -984,6 +1080,13 @@ def carregar_anuncios(cidade):
         todas_fontes.extend(olx)
         fontes_ativas.append(f"OLX ({len(olx)})")
 
+    # Fonte 4: CustoJusto (mais leve, sem protecao)
+    print(f"[Scraping] Tentando CustoJusto...")
+    cj = fetch_custojusto_scraping(cidade, max_anuncios=25)
+    if cj:
+        todas_fontes.extend(cj)
+        fontes_ativas.append(f"CustoJusto ({len(cj)})")
+
     # Fallback para demo
     if not todas_fontes:
         print(f"[Fallback] Todas as fontes falharam. Usando dados de demonstracao.")
@@ -1300,6 +1403,7 @@ HTML_TEMPLATE = """
     function atualizarFaculdades() {
         const cidade = document.getElementById('cidadeSelect').value;
         const facSelect = document.getElementById('faculdadeSelect');
+        const facSelecionada = facSelect.value; // guardar selecao atual
         facSelect.innerHTML = '<option value="">-- Escolher faculdade --</option>';
         if (faculdadesPorCidade[cidade]) {
             faculdadesPorCidade[cidade].forEach(fac => {
@@ -1309,18 +1413,21 @@ HTML_TEMPLATE = """
                 facSelect.appendChild(opt);
             });
         }
-    }
-    // Restaurar selecao
-    const facSel = "{{ faculdade_sel }}";
-    if (facSel) {
-        atualizarFaculdades();
-        for (let i = 0; i < facSelect.options.length; i++) {
-            if (facSelect.options[i].value === facSel) {
-                facSelect.selectedIndex = i;
-                break;
+        // Restaurar faculdade se ainda existir nesta cidade
+        const facSalva = "{{ faculdade_sel }}";
+        if (facSalva) {
+            for (let i = 0; i < facSelect.options.length; i++) {
+                if (facSelect.options[i].value === facSalva) {
+                    facSelect.selectedIndex = i;
+                    break;
+                }
             }
         }
     }
+    // Inicializar na pagina
+    document.addEventListener('DOMContentLoaded', function() {
+        atualizarFaculdades();
+    });
     </script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
