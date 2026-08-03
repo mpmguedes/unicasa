@@ -213,7 +213,7 @@ CACHE = {
     "Coimbra": {"anuncios": None, "timestamp": None, "fonte": None},
 }
 CACHE_TTL = 15 * 60
-MAX_PAGES = 3  # Numero de paginas do Imovirtual a varrer (3 paginas ~ 100 anuncios)
+MAX_PAGES = 5  # Numero de paginas do Imovirtual a varrer (3 paginas ~ 100 anuncios)
 
 GEOCODER = Nominatim(user_agent="unicasa_app_v1")
 GEOCODER_CACHE = {}
@@ -734,9 +734,10 @@ def fetch_olx_scraping(cidade):
 # =============================================================================
 
 def fetch_idealista_playwright(cidade, max_anuncios=30):
-    """Usa Playwright (browser real) para scraping do Idealista."""
+    """Usa Playwright Stealth para scraping do Idealista."""
     try:
         from playwright.sync_api import sync_playwright
+        from playwright_stealth import stealth_sync
     except ImportError:
         print("[Playwright] Nao instalado. Ignorando Idealista.")
         return []
@@ -750,9 +751,12 @@ def fetch_idealista_playwright(cidade, max_anuncios=30):
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": 1366, "height": 768},
+                locale="pt-PT",
+                timezone_id="Europe/Lisbon",
             )
             page = context.new_page()
+            stealth_sync(page)
             print(f"[Playwright] A navegar para Idealista {cidade}...")
             page.goto(url, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)  # Esperar JS renderizar
@@ -837,9 +841,10 @@ def fetch_idealista_playwright(cidade, max_anuncios=30):
 
 
 def fetch_olx_playwright(cidade, max_anuncios=30):
-    """Usa Playwright (browser real) para scraping do OLX."""
+    """Usa Playwright Stealth para scraping do OLX."""
     try:
         from playwright.sync_api import sync_playwright
+        from playwright_stealth import stealth_sync
     except ImportError:
         print("[Playwright] Nao instalado. Ignorando OLX.")
         return []
@@ -853,9 +858,12 @@ def fetch_olx_playwright(cidade, max_anuncios=30):
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": 1366, "height": 768},
+                locale="pt-PT",
+                timezone_id="Europe/Lisbon",
             )
             page = context.new_page()
+            stealth_sync(page)
             print(f"[Playwright] A navegar para OLX {cidade}...")
             page.goto(url, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
