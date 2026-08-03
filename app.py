@@ -10,11 +10,16 @@ INSTALACAO EM WINDOWS:
 1. Abrir o Prompt de Comando (cmd) ou PowerShell
 2. Criar ambiente virtual (recomendado):
    python -m venv venv
-   venv\\Scripts\\activate
+   venv\Scripts\activate
 3. Instalar dependencias:
    pip install flask feedparser geopy haversine beautifulsoup4 lxml requests
+   pip install playwright
+   playwright install chromium
+   # OU para Camoufox (browser anti-bot):
+   pip install camoufox
+   python -m camoufox fetch
 4. Executar a aplicacao:
-   python troomporto.py
+   python app.py
 5. Abrir o browser em: http://127.0.0.1:5000
 ===============================================================================
 """
@@ -213,7 +218,7 @@ CACHE = {
     "Coimbra": {"anuncios": None, "timestamp": None, "fonte": None},
 }
 CACHE_TTL = 15 * 60
-MAX_PAGES = 5  # Numero de paginas do Imovirtual a varrer (3 paginas ~ 100 anuncios)
+MAX_PAGES = 5
 
 GEOCODER = Nominatim(user_agent="unicasa_app_v1")
 GEOCODER_CACHE = {}
@@ -355,7 +360,7 @@ def extrair_data_disponibilidade(titulo, descricao=""):
 
 
 # =============================================================================
-# WEB SCRAPING - IMOVIRTUAL (por cidade)
+# WEB SCRAPING - IMOVIRTUAL (fonte principal - funciona bem)
 # =============================================================================
 
 def fetch_imovirtual_scraping(cidade, pagina=1):
@@ -481,194 +486,82 @@ def fetch_imovirtual_todas_paginas(cidade):
         todos.extend(anuncios)
         print(f"[Scraping] Pagina {pagina}: {len(anuncios)} anuncios")
         if pagina < MAX_PAGES:
-            time.sleep(0.5)  # Respeitar o servidor
+            time.sleep(0.5)
     return todos
 
 
 # =============================================================================
-# WEB SCRAPING - CUSTOJUSTO (outra fonte de anuncios)
+# WEB SCRAPING - CUSTOJUSTO (via JSON Next.js - nao precisa de Playwright!)
 # =============================================================================
 
-def fetch_custojusto_scraping(cidade, max_anuncios=25):
-    """Usa Playwright Stealth para scraping do CustoJusto.pt (site React/Next.js)."""
-    try:
-        from playwright.sync_api import sync_playwright
-        from playwright_stealth import stealth_sync
-    except ImportError:
-        print("[Playwright] Nao instalado. Ignorando CustoJusto.")
-        return []
-
+def fetch_custojusto_scraping(cidade, max_anuncios=40):
+    """Extrai anuncios do CustoJusto via JSON embutido do Next.js."""
     slug = cidade.lower()
-    url = f"https://www.custojusto.pt/{slug}/imobiliario/arrendar-quartos"
-    anuncios = []
-
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1366, "height": 768},
-                locale="pt-PT",
-                timezone_id="Europe/Lisbon",
-            )
-            page = context.new_page()
-            stealth_sync(page)
-            print(f"[Playwright] A navegar para CustoJusto {cidade}...")
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(4000)  # Esperar React renderizar
-
-            # Scroll para carregar mais
-            for _ in range(3):
-                page.evaluate("window.scrollBy(0, 1000)")
-                page.wait_for_timeout(1000)
-
-            html = page.content()
-            browser.close()
-
-        soup = BeautifulSoup(html, "lxml")
-        zonas_cidade = ZONAS.get(cidade, {})
-
-        # Procurar links de anuncios
-        links = soup.find_all("a", href=re.compile(r"/anuncio/|/a/|/quarto-"), limit=max_anuncios)
-        if not links:
-            links = soup.find_all("a", href=True, limit=max_anuncios * 2)
-            # Filtrar so links que parecem anuncios
-            links = [a for a in links if "/" in a.get("href", "") and len(a.get_text(strip=True)) > 10]
-            links = links[:max_anuncios]
-
-        for a_tag in links:
-            try:
-                titulo = a_tag.get_text(strip=True)
-                if not titulo or len(titulo) < 5:
-                    continue
-                href = a_tag.get("href", "")
-                if href.startswith("/"):
-                    link = "https://www.custojusto.pt" + href
-                elif href.startswith("http"):
-                    link = href
-                else:
-                    link = "https://www.custojusto.pt/" + href
-
-                # Procurar preco no parent
-                parent = a_tag.find_parent("div", recursive=True)
-                preco = None
-                if parent:
-                    for sp in parent.find_all("span"):
-                        txt = sp.get_text(strip=True)
-                        if "€" in txt:
-                            preco = extrair_preco(txt)
-                            if preco and 50 < preco < 5000:
-                                break
-
-                if preco is None:
-                    # Tentar no proprio texto
-                    preco = extrair_preco(titulo)
-                    if not preco or preco < 50:
-                        continue
-
-                local = cidade
-                if parent:
-                    for sp in parent.find_all("span"):
-                        txt = sp.get_text(strip=True)
-                        if any(z.lower() in txt.lower() for z in zonas_cidade):
-                            local = txt
-                            break
-
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": local,
-                    "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": None,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "CustoJusto",
-                })
-            except Exception:
-                continue
-
-        print(f"[Playwright] CustoJusto {cidade}: {len(anuncios)} anuncios")
-        return anuncios
-
-    except Exception as e:
-        print(f"[Playwright] Erro CustoJusto {cidade}: {e}")
-        return []
-    """Faz scraping do CustoJusto.pt para quartos."""
-    slug = cidade.lower()
-    url = f"https://www.custojusto.pt/imoveis/arrendar-quartos?ps=60&cg=1020&w=117&st=s&cs={slug}"
+    url = f"https://www.custojusto.pt/{slug}/imobiliario/quartos"
     headers = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9",
+        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
     }
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
+
+        next_data = soup.find("script", id="__NEXT_DATA__")
+        if not next_data:
+            print(f"[CustoJusto] JSON nao encontrado para {cidade}")
+            return []
+
+        data = json.loads(next_data.string)
+        list_items = data.get("props", {}).get("pageProps", {}).get("listItems", [])
+
         anuncios = []
         zonas_cidade = ZONAS.get(cidade, {})
 
-        # CustoJusto: cada anuncio e um div com classe "container_related"
-        items = soup.find_all("div", {"class": "container_related"}, limit=max_anuncios)
-        if not items:
-            items = soup.find_all("article", limit=max_anuncios)
-
-        for item in items:
+        for item in list_items[:max_anuncios]:
             try:
-                # Titulo
-                title_tag = item.find("h2") or item.find("a", class_=re.compile(r"title"))
-                if not title_tag:
-                    title_tag = item.find("a")
-                titulo = title_tag.get_text(strip=True) if title_tag else f"Quarto em {cidade}"
-
-                # Link
-                link = ""
-                a_tag = item.find("a", href=True)
-                if a_tag:
-                    href = a_tag["href"]
-                    if href.startswith("/"):
-                        link = "https://www.custojusto.pt" + href
-                    else:
-                        link = href
-
-                # Preco
-                preco = None
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "€" in txt:
-                        preco = extrair_preco(txt)
-                        if preco:
-                            break
-                if preco is None:
+                titulo = item.get("title", "")
+                if not titulo:
                     continue
 
-                # Local
-                local = cidade
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if any(z.lower() in txt.lower() for z in zonas_cidade):
-                        local = txt
-                        break
+                preco = item.get("price")
+                if isinstance(preco, str):
+                    preco = preco.replace("€", "").replace(".", "").replace(",", ".").strip()
+                    try:
+                        preco = float(preco)
+                    except ValueError:
+                        continue
+                if not preco or preco < 50 or preco > 5000:
+                    continue
 
-                zona = determinar_zona(titulo, local, cidade)
+                link = item.get("url", "")
+                if link.startswith("/"):
+                    link = f"https://www.custojusto.pt{link}"
+
+                desc = item.get("body", "")[:200]
+
+                loc_data = item.get("locationNames", {})
+                local = ""
+                if isinstance(loc_data, dict):
+                    parts = []
+                    for key in ["parish", "county", "district"]:
+                        if loc_data.get(key):
+                            parts.append(loc_data[key])
+                    local = ", ".join(parts)
+                elif isinstance(loc_data, list) and loc_data:
+                    local = ", ".join(str(x) for x in loc_data)
+                if not local:
+                    local = cidade
+
+                img = item.get("imageFullURL", "")
+                list_time = item.get("listTime", "")
+
+                zona = determinar_zona(titulo, desc + " " + local, cidade)
                 if not zona:
                     for z in zonas_cidade:
-                        if z.lower() in local.lower():
+                        if z.lower() in local.lower() or z.lower() in titulo.lower():
                             zona = z
                             break
 
@@ -680,22 +573,58 @@ def fetch_custojusto_scraping(cidade, max_anuncios=25):
                 anuncios.append({
                     "titulo": titulo,
                     "preco": preco,
-                    "descricao": local,
+                    "descricao": desc or local,
                     "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
+                    "data": list_time or datetime.now().strftime("%Y-%m-%d"),
                     "disponivel": None,
                     "lat": lat,
                     "lon": lon,
                     "zona": zona,
                     "fonte": "CustoJusto",
+                    "imagem": img,
                 })
             except Exception:
                 continue
-        print(f"[Scraping] CustoJusto {cidade}: {len(anuncios)} anuncios")
+
+        print(f"[CustoJusto] {cidade}: {len(anuncios)} anuncios")
         return anuncios
+
     except Exception as e:
-        print(f"[Scraping] Erro CustoJusto {cidade}: {e}")
+        print(f"[CustoJusto] Erro {cidade}: {e}")
         return []
+
+
+# =============================================================================
+# UNIPLACES (desativado - site usa JS pesado)
+# =============================================================================
+
+def fetch_uniplaces_scraping(cidade, max_anuncios=20):
+    return []
+
+
+# =============================================================================
+# ERASMUSINN (desativado - 404)
+# =============================================================================
+
+def fetch_erasmusinn_scraping(cidade, max_anuncios=20):
+    return []
+
+
+# =============================================================================
+# TENTATIVA IDEALISTA / OLX (protegidos por anti-bot)
+# ============================================================================= / OLX (protegidos por anti-bot)
+# =============================================================================
+
+def fetch_idealista_scraping(cidade):
+    """Tentativa de scraping do Idealista. Nota: usa DataDome CAPTCHA."""
+    print(f"[Idealista] Aviso: Idealista usa protecao DataDome. Tentativa pode falhar.")
+    return []
+
+
+def fetch_olx_scraping(cidade):
+    """Tentativa de scraping do OLX. Nota: usa Cloudflare."""
+    print(f"[OLX] Aviso: OLX usa protecao Cloudflare. Tentativa pode falhar.")
+    return []
 
 
 # =============================================================================
@@ -756,414 +685,7 @@ def get_demo_data(cidade):
 
 
 # =============================================================================
-# WEB SCRAPING - IDEALISTA (tentativa)
-# =============================================================================
-
-def fetch_idealista_scraping(cidade):
-    """Tenta scraping do Idealista. Nota: Idealista tem protecao anti-bot forte."""
-    slug = cidade.lower()
-    url = f"https://www.idealista.pt/arrendar-quartos/{slug}/"
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, "lxml")
-        anuncios = []
-        # Idealista usa articles com classes dinamicas
-        items = soup.find_all("article", limit=25)
-        zonas_cidade = ZONAS.get(cidade, {})
-        for item in items:
-            try:
-                # Titulo
-                title_tag = item.find("a", {"class": re.compile(r"item-link", re.I)})
-                if not title_tag:
-                    # Tentar outras estruturas
-                    title_tag = item.find("a", title=True)
-                titulo = title_tag.get_text(strip=True) if title_tag else f"Quarto em {cidade}"
-                link = title_tag["href"] if title_tag and title_tag.has_attr("href") else ""
-                if link and link.startswith("/"):
-                    link = "https://www.idealista.pt" + link
-
-                # Preco
-                price_tag = item.find("span", {"class": re.compile(r"item-price", re.I)})
-                preco_texto = price_tag.get_text(strip=True) if price_tag else ""
-                if not preco_texto:
-                    # Procurar qualquer span com €
-                    for sp in item.find_all("span"):
-                        if "€" in sp.get_text(strip=True):
-                            preco_texto = sp.get_text(strip=True)
-                            break
-                preco = extrair_preco(preco_texto)
-                if preco is None:
-                    continue
-
-                # Localizacao
-                loc_tag = item.find("a", {"class": re.compile(r"item-link", re.I)})
-                local = cidade
-                if loc_tag:
-                    # Procurar span adjacente ou texto
-                    for sib in item.find_all("span"):
-                        txt = sib.get_text(strip=True)
-                        if any(z.lower() in txt.lower() for z in zonas_cidade) and "/m" not in txt:
-                            local = txt
-                            break
-
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": local,
-                    "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": None,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "Idealista",
-                })
-            except Exception:
-                continue
-        return anuncios
-    except Exception as e:
-        print(f"[Scraping] Erro Idealista {cidade}: {e}")
-        return []
-
-
-# =============================================================================
-# WEB SCRAPING - OLX (tentativa direta da pagina)
-# =============================================================================
-
-def fetch_olx_scraping(cidade):
-    """Tenta scraping do OLX."""
-    slug = cidade.lower()
-    url = f"https://www.olx.pt/imoveis/quartos-e-camaras/{slug}/"
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9",
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, "lxml")
-        anuncios = []
-        # OLX usa divs com data-testid
-        items = soup.find_all("div", {"data-testid": re.compile(r"listing-card", re.I)}, limit=25)
-        if not items:
-            # Fallback: procurar por links com /d/anuncio/
-            links = soup.find_all("a", href=re.compile(r"/d/anuncio/"), limit=25)
-            items = []
-            for link in links:
-                parent = link.find_parent("div", recursive=True)
-                if parent:
-                    items.append(parent)
-
-        zonas_cidade = ZONAS.get(cidade, {})
-        for item in items:
-            try:
-                # Titulo
-                title_tag = item.find("h6") or item.find("h4") or item.find("a")
-                titulo = title_tag.get_text(strip=True) if title_tag else f"Quarto em {cidade}"
-
-                # Link
-                link_tag = item.find("a", href=re.compile(r"/d/anuncio/"))
-                link = ""
-                if link_tag and link_tag.has_attr("href"):
-                    link = "https://www.olx.pt" + link_tag["href"]
-
-                # Preco
-                preco = None
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "€" in txt:
-                        preco = extrair_preco(txt)
-                        if preco:
-                            break
-                if preco is None:
-                    continue
-
-                # Local
-                local = cidade
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if any(z.lower() in txt.lower() for z in zonas_cidade):
-                        local = txt
-                        break
-
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": local,
-                    "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": None,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "OLX",
-                })
-            except Exception:
-                continue
-        return anuncios
-    except Exception as e:
-        print(f"[Scraping] Erro OLX {cidade}: {e}")
-        return []
-
-
-# =============================================================================
-# WEB SCRAPING COM PLAYWRIGHT (contorna Cloudflare)
-# =============================================================================
-
-def fetch_idealista_playwright(cidade, max_anuncios=30):
-    """Usa Playwright Stealth para scraping do Idealista."""
-    try:
-        from playwright.sync_api import sync_playwright
-        from playwright_stealth import stealth_sync
-    except ImportError:
-        print("[Playwright] Nao instalado. Ignorando Idealista.")
-        return []
-
-    slug = cidade.lower()
-    url = f"https://www.idealista.pt/arrendar-quartos/{slug}/"
-    anuncios = []
-
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1366, "height": 768},
-                locale="pt-PT",
-                timezone_id="Europe/Lisbon",
-            )
-            page = context.new_page()
-            stealth_sync(page)
-            print(f"[Playwright] A navegar para Idealista {cidade}...")
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)  # Esperar JS renderizar
-
-            # Scroll para carregar mais
-            for _ in range(3):
-                page.evaluate("window.scrollBy(0, 800)")
-                page.wait_for_timeout(1000)
-
-            html = page.content()
-            browser.close()
-
-        soup = BeautifulSoup(html, "lxml")
-        zonas_cidade = ZONAS.get(cidade, {})
-
-        # Idealista usa articles com data-element-id ou classes especificas
-        items = soup.find_all("article", limit=max_anuncios)
-        if not items:
-            items = soup.find_all("div", {"class": re.compile(r"item"), "data-ad": True}, limit=max_anuncios)
-
-        for item in items:
-            try:
-                # Titulo - procurar link principal
-                title_tag = item.find("a", href=re.compile(r"/imovel/"))
-                if not title_tag:
-                    continue
-                titulo = title_tag.get_text(strip=True)
-                link = "https://www.idealista.pt" + title_tag["href"]
-
-                # Preco
-                preco = None
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "€" in txt and "/m" not in txt.lower():
-                        preco = extrair_preco(txt)
-                        if preco:
-                            break
-                if preco is None:
-                    continue
-
-                # Localizacao
-                local = cidade
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if any(z.lower() in txt.lower() for z in zonas_cidade):
-                        local = txt
-                        break
-
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": local,
-                    "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": None,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "Idealista",
-                })
-            except Exception:
-                continue
-
-        print(f"[Playwright] Idealista {cidade}: {len(anuncios)} anuncios")
-        return anuncios
-
-    except Exception as e:
-        print(f"[Playwright] Erro Idealista {cidade}: {e}")
-        return []
-
-
-def fetch_olx_playwright(cidade, max_anuncios=30):
-    """Usa Playwright Stealth para scraping do OLX."""
-    try:
-        from playwright.sync_api import sync_playwright
-        from playwright_stealth import stealth_sync
-    except ImportError:
-        print("[Playwright] Nao instalado. Ignorando OLX.")
-        return []
-
-    slug = cidade.lower()
-    url = f"https://www.olx.pt/imoveis/quartos-e-camaras/{slug}/"
-    anuncios = []
-
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1366, "height": 768},
-                locale="pt-PT",
-                timezone_id="Europe/Lisbon",
-            )
-            page = context.new_page()
-            stealth_sync(page)
-            print(f"[Playwright] A navegar para OLX {cidade}...")
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
-
-            for _ in range(3):
-                page.evaluate("window.scrollBy(0, 800)")
-                page.wait_for_timeout(1000)
-
-            html = page.content()
-            browser.close()
-
-        soup = BeautifulSoup(html, "lxml")
-        zonas_cidade = ZONAS.get(cidade, {})
-
-        # OLX: procurar por cards de anuncio
-        items = soup.find_all("div", {"data-testid": re.compile(r"listing-card|l-card")}, limit=max_anuncios)
-        if not items:
-            # Fallback
-            items = soup.find_all("a", href=re.compile(r"/d/anuncio/"), limit=max_anuncios)
-
-        for item in items:
-            try:
-                # Se for um link direto
-                if item.name == "a":
-                    link = "https://www.olx.pt" + item["href"]
-                    parent = item.find_parent("div", recursive=True)
-                    titulo = item.get_text(strip=True)
-                else:
-                    link_tag = item.find("a", href=re.compile(r"/d/anuncio/"))
-                    link = "https://www.olx.pt" + link_tag["href"] if link_tag else ""
-                    titulo_tag = item.find("h6") or item.find("h4") or link_tag
-                    titulo = titulo_tag.get_text(strip=True) if titulo_tag else f"Quarto em {cidade}"
-
-                preco = None
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "€" in txt:
-                        preco = extrair_preco(txt)
-                        if preco:
-                            break
-                if preco is None:
-                    continue
-
-                local = cidade
-                for sp in item.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if any(z.lower() in txt.lower() for z in zonas_cidade):
-                        local = txt
-                        break
-
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": local,
-                    "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": None,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "OLX",
-                })
-            except Exception:
-                continue
-
-        print(f"[Playwright] OLX {cidade}: {len(anuncios)} anuncios")
-        return anuncios
-
-    except Exception as e:
-        print(f"[Playwright] Erro OLX {cidade}: {e}")
-        return []
-
-
-# =============================================================================
-# CARREGAMENTO COMBINADO (multiplas fontes de scraping)
+# CARREGAMENTO COMBINADO (multiplas fontes)
 # =============================================================================
 
 def carregar_anuncios(cidade):
@@ -1176,37 +698,37 @@ def carregar_anuncios(cidade):
     todas_fontes = []
     fontes_ativas = []
 
-    # Fonte 1: Imovirtual com paginacao
-    print(f"[Scraping] Tentando Imovirtual (ate {MAX_PAGES} paginas)...")
+    # Fonte 1: Imovirtual (mais confiavel)
+    print(f"[Scraping] A tentar Imovirtual (ate {MAX_PAGES} paginas)...")
     imovirtual = fetch_imovirtual_todas_paginas(cidade)
     if imovirtual:
         todas_fontes.extend(imovirtual)
         fontes_ativas.append(f"Imovirtual ({len(imovirtual)})")
 
-    # Fonte 2: Idealista via Playwright (browser real)
-    print(f"[Scraping] Tentando Idealista via Playwright...")
-    idealista = fetch_idealista_playwright(cidade, max_anuncios=25)
-    if idealista:
-        todas_fontes.extend(idealista)
-        fontes_ativas.append(f"Idealista ({len(idealista)})")
-
-    # Fonte 3: OLX via Playwright (browser real)
-    print(f"[Scraping] Tentando OLX via Playwright...")
-    olx = fetch_olx_playwright(cidade, max_anuncios=25)
-    if olx:
-        todas_fontes.extend(olx)
-        fontes_ativas.append(f"OLX ({len(olx)})")
-
-    # Fonte 4: CustoJusto (mais leve, sem protecao)
-    print(f"[Scraping] Tentando CustoJusto...")
-    cj = fetch_custojusto_scraping(cidade, max_anuncios=25)
+    # Fonte 2: CustoJusto (via Playwright)
+    print(f"[Scraping] A tentar CustoJusto...")
+    cj = fetch_custojusto_scraping(cidade, max_anuncios=20)
     if cj:
         todas_fontes.extend(cj)
         fontes_ativas.append(f"CustoJusto ({len(cj)})")
 
+    # Fonte 3: Uniplaces
+    print(f"[Scraping] A tentar Uniplaces...")
+    up = fetch_uniplaces_scraping(cidade, max_anuncios=20)
+    if up:
+        todas_fontes.extend(up)
+        fontes_ativas.append(f"Uniplaces ({len(up)})")
+
+    # Fonte 4: Erasmusinn
+    print(f"[Scraping] A tentar Erasmusinn...")
+    ei = fetch_erasmusinn_scraping(cidade, max_anuncios=20)
+    if ei:
+        todas_fontes.extend(ei)
+        fontes_ativas.append(f"Erasmusinn ({len(ei)})")
+
     # Fallback para demo
     if not todas_fontes:
-        print(f"[Fallback] Todas as fontes falharam. Usando dados de demonstracao.")
+        print(f"[Fallback] Todas as fontes falharam. A usar dados de demonstracao.")
         todas_fontes = get_demo_data(cidade)
         fontes_ativas = ["Dados de demonstracao"]
 
@@ -1285,7 +807,9 @@ HTML_TEMPLATE = """
         .price-tag small { font-size: 0.85rem; font-weight: 500; color: var(--text-muted); }
         .badge-source { font-size: 0.7rem; font-weight: 600; padding: 0.35rem 0.65rem; border-radius: 20px; }
         .badge-imovirtual { background: #fef3c7; color: #92400e; }
-        .badge-olx { background: #dcfce7; color: #166534; }
+        .badge-custojusto { background: #dbeafe; color: #1e40af; }
+        .badge-uniplaces { background: #dcfce7; color: #166534; }
+        .badge-erasmusinn { background: #f3e8ff; color: #6b21a8; }
         .badge-demo { background: #f3e8ff; color: #6b21a8; }
         .distancia-box {
             background: linear-gradient(135deg, #ebf8ff 0%, #e6fffa 100%);
@@ -1316,6 +840,7 @@ HTML_TEMPLATE = """
         .empty-state { text-align: center; padding: 3rem 1rem; color: var(--text-muted); }
         .form-range { margin-top: 0.25rem; }
         .form-range + output { font-size: 0.8rem; margin-left: 0.5rem; vertical-align: middle; }
+        .fonte-badge { font-size: 0.75rem; padding: 0.25rem 0.5rem; border-radius: 6px; margin-right: 0.5rem; }
         @media (max-width: 768px) {
             .filter-card .row > div { margin-bottom: 0.75rem; }
             .price-tag { font-size: 1.25rem; }
@@ -1337,7 +862,7 @@ HTML_TEMPLATE = """
     </div>
     {% elif fonte %}
     <div class="alert-info-custom py-2 text-center">
-        <strong>Fonte ativa: {{ fonte }}</strong> —
+        <strong>Fontes ativas: {{ fonte }}</strong> —
         <a href="/refresh?cidade={{ cidade_sel }}" class="text-decoration-underline">Atualizar agora</a>
     </div>
     {% endif %}
@@ -1455,7 +980,8 @@ HTML_TEMPLATE = """
                     {% endif %}
                     <div class="card-body">
                         <div class="d-flex justify-content-between align-items-start mb-2">
-                            <span class="badge badge-{{ 'demo' if 'demonstracao' in (a.fonte or '') else a.fonte.lower().split()[0] if a.fonte else 'demo' }}">
+                            {% set fonte_key = a.fonte.lower().replace(' ', '').replace('.', '') if a.fonte else 'demo' %}
+                            <span class="badge badge-{{ fonte_key }}">
                                 {{ a.fonte or 'Desconhecida' }}
                             </span>
                             <span class="text-muted" style="font-size:0.75rem;">{{ a.data or '' }}</span>
@@ -1517,28 +1043,22 @@ HTML_TEMPLATE = """
 
     <script>
     const faculdadesPorCidade = {{ faculdades_json | safe }};
+    const faculdadeSelecionadaAtual = "{{ faculdade_sel }}";
+    
     function atualizarFaculdades() {
         const cidade = document.getElementById('cidadeSelect').value;
         const facSelect = document.getElementById('faculdadeSelect');
-        const facSelecionada = facSelect.value; // guardar selecao atual
         facSelect.innerHTML = '<option value="">-- Escolher faculdade --</option>';
         if (faculdadesPorCidade[cidade]) {
             faculdadesPorCidade[cidade].forEach(fac => {
                 const opt = document.createElement('option');
                 opt.value = fac;
                 opt.textContent = fac;
+                if (fac === faculdadeSelecionadaAtual) {
+                    opt.selected = true;
+                }
                 facSelect.appendChild(opt);
             });
-        }
-        // Restaurar faculdade se ainda existir nesta cidade
-        const facSalva = "{{ faculdade_sel }}";
-        if (facSalva) {
-            for (let i = 0; i < facSelect.options.length; i++) {
-                if (facSelect.options[i].value === facSalva) {
-                    facSelect.selectedIndex = i;
-                    break;
-                }
-            }
         }
     }
     // Inicializar na pagina
@@ -1683,6 +1203,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  Faculdades: {sum(len(v) for v in CIDADES.values())} (total)")
     print(f"  Zonas: {sum(len(v) for v in ZONAS.values())} (total)")
+    print(f"  Fontes: Imovirtual, CustoJusto (Idealista/OLX bloqueados por anti-bot)")
     print(f"  URL: http://0.0.0.0:{port}")
     print("=" * 60)
     app.run(host="0.0.0.0", port=port, debug=False)
