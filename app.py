@@ -610,6 +610,224 @@ def fetch_erasmusinn_scraping(cidade, max_anuncios=20):
     return []
 
 
+
+
+# =============================================================================
+# WEB SCRAPING - HOUSINGANYWHERE (popular entre estudantes Erasmus)
+# =============================================================================
+
+def fetch_housinganywhere(cidade, max_anuncios=20):
+    """Extrai anuncios do HousingAnywhere - muito popular entre estudantes."""
+    urls = {
+        "Porto": "https://housinganywhere.com/Porto--Portugal",
+        "Lisboa": "https://housinganywhere.com/Lisbon--Portugal",
+        "Coimbra": "https://housinganywhere.com/Coimbra--Portugal",
+    }
+    url = urls.get(cidade)
+    if not url:
+        return []
+
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        links = soup.find_all("a", href=re.compile(r"/room/"))
+        anuncios = []
+        vistos = set()
+        zonas_cidade = ZONAS.get(cidade, {})
+
+        for a in links[:max_anuncios]:
+            try:
+                href = a.get("href", "")
+                if href in vistos:
+                    continue
+                vistos.add(href)
+
+                if not href.startswith("http"):
+                    link = "https://housinganywhere.com" + href
+                else:
+                    link = href
+
+                txt = a.get_text(strip=True)
+
+                # Extrair preco - formato: €1050/month
+                preco = None
+                m = re.search(r'€([\d\s]+)/month', txt)
+                if m:
+                    s = m.group(1).replace(' ', '').replace('.', '').replace(',', '.')
+                    try:
+                        preco = float(s)
+                    except ValueError:
+                        continue
+                if not preco or preco < 100 or preco > 5000:
+                    continue
+
+                # Titulo - texto antes do preco
+                titulo = txt[:200]
+
+                # Localizacao
+                local = cidade
+                m2 = re.search(r'(?:in|Private room in|Studio in|Apartment in|House in)\s+([^€•]+?)(?:\d+\s*m²|•|$)', txt, re.IGNORECASE)
+                if m2:
+                    local = m2.group(1).strip()[:80]
+
+                # Disponibilidade
+                disp = None
+                m3 = re.search(r'Available\s+(now|from\s+\d+\s+\w+|from\s+\w+)', txt, re.IGNORECASE)
+                if m3:
+                    disp = "Disponivel " + m3.group(1)
+
+                # Zona
+                zona = determinar_zona(titulo, local, cidade)
+                if not zona:
+                    for z in zonas_cidade:
+                        if z.lower() in local.lower() or z.lower() in titulo.lower():
+                            zona = z
+                            break
+
+                lat, lon = None, None
+                if zona and zona in zonas_cidade:
+                    zd = zonas_cidade[zona]
+                    lat, lon = zd["lat"], zd["lon"]
+
+                anuncios.append({
+                    "titulo": titulo[:120],
+                    "preco": preco,
+                    "descricao": local,
+                    "link": link,
+                    "data": "",
+                    "disponivel": disp,
+                    "lat": lat,
+                    "lon": lon,
+                    "zona": zona,
+                    "fonte": "HousingAnywhere",
+                })
+            except Exception:
+                continue
+
+        print(f"[HousingAnywhere] {cidade}: {len(anuncios)} anuncios")
+        return anuncios
+
+    except Exception as e:
+        print(f"[HousingAnywhere] Erro {cidade}: {e}")
+        return []
+
+
+# =============================================================================
+# WEB SCRAPING - SPOTAHOME (quartos verificados para estudantes)
+# =============================================================================
+
+def fetch_spotahome(cidade, max_anuncios=20):
+    """Extrai anuncios do Spotahome - quartos verificados."""
+    urls = {
+        "Porto": "https://www.spotahome.com/s/porto--pt",
+        "Lisboa": "https://www.spotahome.com/s/lisbon--pt",
+        "Coimbra": "https://www.spotahome.com/s/coimbra--pt",
+    }
+    url = urls.get(cidade)
+    if not url:
+        return []
+
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Spotahome usa links /for-rent:rooms/
+        links = soup.find_all("a", href=re.compile(r"/for-rent:rooms/"))
+        anuncios = []
+        vistos = set()
+        zonas_cidade = ZONAS.get(cidade, {})
+
+        for a in links[:max_anuncios]:
+            try:
+                href = a.get("href", "")
+                if href in vistos:
+                    continue
+                vistos.add(href)
+
+                if href.startswith("/"):
+                    link = "https://www.spotahome.com" + href
+                else:
+                    link = href
+
+                txt = a.get_text(strip=True)
+                if not txt or len(txt) < 10:
+                    continue
+
+                # Preco
+                preco = None
+                for padrao in [r'€\s*([\d\.]+)', r'([\d\.]+)\s*€']:
+                    m = re.search(padrao, txt, re.IGNORECASE)
+                    if m:
+                        s = m.group(1).replace('.', '').replace(',', '.')
+                        try:
+                            preco = float(s)
+                            break
+                        except ValueError:
+                            continue
+
+                if not preco or preco < 100 or preco > 5000:
+                    continue
+
+                # Titulo - limpar texto
+                titulo = txt[:150]
+
+                # Disponibilidade
+                disp = None
+                m = re.search(r'Dispon[ií]vel\s+(\d+\s+\w+|agora|j[aá])', txt, re.IGNORECASE)
+                if m:
+                    disp = "Disponivel " + m.group(1)
+
+                # Zona
+                zona = determinar_zona(titulo, "", cidade)
+                if not zona:
+                    for z in zonas_cidade:
+                        if z.lower() in titulo.lower():
+                            zona = z
+                            break
+
+                lat, lon = None, None
+                if zona and zona in zonas_cidade:
+                    zd = zonas_cidade[zona]
+                    lat, lon = zd["lat"], zd["lon"]
+
+                anuncios.append({
+                    "titulo": titulo[:120],
+                    "preco": preco,
+                    "descricao": f"Quarto verificado em {cidade}",
+                    "link": link,
+                    "data": "",
+                    "disponivel": disp,
+                    "lat": lat,
+                    "lon": lon,
+                    "zona": zona,
+                    "fonte": "Spotahome",
+                })
+            except Exception:
+                continue
+
+        print(f"[Spotahome] {cidade}: {len(anuncios)} anuncios")
+        return anuncios
+
+    except Exception as e:
+        print(f"[Spotahome] Erro {cidade}: {e}")
+        return []
+
+
 # =============================================================================
 # TENTATIVA IDEALISTA / OLX (protegidos por anti-bot)
 # ============================================================================= / OLX (protegidos por anti-bot)
@@ -712,19 +930,19 @@ def carregar_anuncios(cidade):
         todas_fontes.extend(cj)
         fontes_ativas.append(f"CustoJusto ({len(cj)})")
 
-    # Fonte 3: Uniplaces
-    print(f"[Scraping] A tentar Uniplaces...")
-    up = fetch_uniplaces_scraping(cidade, max_anuncios=20)
-    if up:
-        todas_fontes.extend(up)
-        fontes_ativas.append(f"Uniplaces ({len(up)})")
+    # Fonte 3: HousingAnywhere
+    print(f"[Scraping] A tentar HousingAnywhere...")
+    ha = fetch_housinganywhere(cidade, max_anuncios=20)
+    if ha:
+        todas_fontes.extend(ha)
+        fontes_ativas.append(f"HousingAnywhere ({len(ha)})")
 
-    # Fonte 4: Erasmusinn
-    print(f"[Scraping] A tentar Erasmusinn...")
-    ei = fetch_erasmusinn_scraping(cidade, max_anuncios=20)
-    if ei:
-        todas_fontes.extend(ei)
-        fontes_ativas.append(f"Erasmusinn ({len(ei)})")
+    # Fonte 4: Spotahome
+    print(f"[Scraping] A tentar Spotahome...")
+    sp = fetch_spotahome(cidade, max_anuncios=20)
+    if sp:
+        todas_fontes.extend(sp)
+        fontes_ativas.append(f"Spotahome ({len(sp)})")
 
     # Fallback para demo
     if not todas_fontes:
@@ -1203,7 +1421,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  Faculdades: {sum(len(v) for v in CIDADES.values())} (total)")
     print(f"  Zonas: {sum(len(v) for v in ZONAS.values())} (total)")
-    print(f"  Fontes: Imovirtual, CustoJusto (Idealista/OLX bloqueados por anti-bot)")
+    print(f"  Fontes: Imovirtual, CustoJusto, HousingAnywhere, Spotahome (Idealista/OLX bloqueados)")
     print(f"  URL: http://0.0.0.0:{port}")
     print("=" * 60)
     app.run(host="0.0.0.0", port=port, debug=False)
