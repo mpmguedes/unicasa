@@ -481,8 +481,221 @@ def fetch_imovirtual_todas_paginas(cidade):
         todos.extend(anuncios)
         print(f"[Scraping] Pagina {pagina}: {len(anuncios)} anuncios")
         if pagina < MAX_PAGES:
-            time.sleep(1.5)  # Respeitar o servidor
+            time.sleep(0.5)  # Respeitar o servidor
     return todos
+
+
+# =============================================================================
+# WEB SCRAPING - CUSTOJUSTO (outra fonte de anuncios)
+# =============================================================================
+
+def fetch_custojusto_scraping(cidade, max_anuncios=25):
+    """Usa Playwright Stealth para scraping do CustoJusto.pt (site React/Next.js)."""
+    try:
+        from playwright.sync_api import sync_playwright
+        from playwright_stealth import stealth_sync
+    except ImportError:
+        print("[Playwright] Nao instalado. Ignorando CustoJusto.")
+        return []
+
+    slug = cidade.lower()
+    url = f"https://www.custojusto.pt/{slug}/imobiliario/arrendar-quartos"
+    anuncios = []
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1366, "height": 768},
+                locale="pt-PT",
+                timezone_id="Europe/Lisbon",
+            )
+            page = context.new_page()
+            stealth_sync(page)
+            print(f"[Playwright] A navegar para CustoJusto {cidade}...")
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(4000)  # Esperar React renderizar
+
+            # Scroll para carregar mais
+            for _ in range(3):
+                page.evaluate("window.scrollBy(0, 1000)")
+                page.wait_for_timeout(1000)
+
+            html = page.content()
+            browser.close()
+
+        soup = BeautifulSoup(html, "lxml")
+        zonas_cidade = ZONAS.get(cidade, {})
+
+        # Procurar links de anuncios
+        links = soup.find_all("a", href=re.compile(r"/anuncio/|/a/|/quarto-"), limit=max_anuncios)
+        if not links:
+            links = soup.find_all("a", href=True, limit=max_anuncios * 2)
+            # Filtrar so links que parecem anuncios
+            links = [a for a in links if "/" in a.get("href", "") and len(a.get_text(strip=True)) > 10]
+            links = links[:max_anuncios]
+
+        for a_tag in links:
+            try:
+                titulo = a_tag.get_text(strip=True)
+                if not titulo or len(titulo) < 5:
+                    continue
+                href = a_tag.get("href", "")
+                if href.startswith("/"):
+                    link = "https://www.custojusto.pt" + href
+                elif href.startswith("http"):
+                    link = href
+                else:
+                    link = "https://www.custojusto.pt/" + href
+
+                # Procurar preco no parent
+                parent = a_tag.find_parent("div", recursive=True)
+                preco = None
+                if parent:
+                    for sp in parent.find_all("span"):
+                        txt = sp.get_text(strip=True)
+                        if "€" in txt:
+                            preco = extrair_preco(txt)
+                            if preco and 50 < preco < 5000:
+                                break
+
+                if preco is None:
+                    # Tentar no proprio texto
+                    preco = extrair_preco(titulo)
+                    if not preco or preco < 50:
+                        continue
+
+                local = cidade
+                if parent:
+                    for sp in parent.find_all("span"):
+                        txt = sp.get_text(strip=True)
+                        if any(z.lower() in txt.lower() for z in zonas_cidade):
+                            local = txt
+                            break
+
+                zona = determinar_zona(titulo, local, cidade)
+                if not zona:
+                    for z in zonas_cidade:
+                        if z.lower() in local.lower():
+                            zona = z
+                            break
+
+                lat, lon = None, None
+                if zona and zona in zonas_cidade:
+                    zd = zonas_cidade[zona]
+                    lat, lon = zd["lat"], zd["lon"]
+
+                anuncios.append({
+                    "titulo": titulo,
+                    "preco": preco,
+                    "descricao": local,
+                    "link": link,
+                    "data": datetime.now().strftime("%Y-%m-%d"),
+                    "disponivel": None,
+                    "lat": lat,
+                    "lon": lon,
+                    "zona": zona,
+                    "fonte": "CustoJusto",
+                })
+            except Exception:
+                continue
+
+        print(f"[Playwright] CustoJusto {cidade}: {len(anuncios)} anuncios")
+        return anuncios
+
+    except Exception as e:
+        print(f"[Playwright] Erro CustoJusto {cidade}: {e}")
+        return []
+    """Faz scraping do CustoJusto.pt para quartos."""
+    slug = cidade.lower()
+    url = f"https://www.custojusto.pt/imoveis/arrendar-quartos?ps=60&cg=1020&w=117&st=s&cs={slug}"
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept-Language": "pt-PT,pt;q=0.9",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+        anuncios = []
+        zonas_cidade = ZONAS.get(cidade, {})
+
+        # CustoJusto: cada anuncio e um div com classe "container_related"
+        items = soup.find_all("div", {"class": "container_related"}, limit=max_anuncios)
+        if not items:
+            items = soup.find_all("article", limit=max_anuncios)
+
+        for item in items:
+            try:
+                # Titulo
+                title_tag = item.find("h2") or item.find("a", class_=re.compile(r"title"))
+                if not title_tag:
+                    title_tag = item.find("a")
+                titulo = title_tag.get_text(strip=True) if title_tag else f"Quarto em {cidade}"
+
+                # Link
+                link = ""
+                a_tag = item.find("a", href=True)
+                if a_tag:
+                    href = a_tag["href"]
+                    if href.startswith("/"):
+                        link = "https://www.custojusto.pt" + href
+                    else:
+                        link = href
+
+                # Preco
+                preco = None
+                for sp in item.find_all("span"):
+                    txt = sp.get_text(strip=True)
+                    if "€" in txt:
+                        preco = extrair_preco(txt)
+                        if preco:
+                            break
+                if preco is None:
+                    continue
+
+                # Local
+                local = cidade
+                for sp in item.find_all("span"):
+                    txt = sp.get_text(strip=True)
+                    if any(z.lower() in txt.lower() for z in zonas_cidade):
+                        local = txt
+                        break
+
+                zona = determinar_zona(titulo, local, cidade)
+                if not zona:
+                    for z in zonas_cidade:
+                        if z.lower() in local.lower():
+                            zona = z
+                            break
+
+                lat, lon = None, None
+                if zona and zona in zonas_cidade:
+                    zd = zonas_cidade[zona]
+                    lat, lon = zd["lat"], zd["lon"]
+
+                anuncios.append({
+                    "titulo": titulo,
+                    "preco": preco,
+                    "descricao": local,
+                    "link": link,
+                    "data": datetime.now().strftime("%Y-%m-%d"),
+                    "disponivel": None,
+                    "lat": lat,
+                    "lon": lon,
+                    "zona": zona,
+                    "fonte": "CustoJusto",
+                })
+            except Exception:
+                continue
+        print(f"[Scraping] CustoJusto {cidade}: {len(anuncios)} anuncios")
+        return anuncios
+    except Exception as e:
+        print(f"[Scraping] Erro CustoJusto {cidade}: {e}")
+        return []
 
 
 # =============================================================================
@@ -984,6 +1197,13 @@ def carregar_anuncios(cidade):
         todas_fontes.extend(olx)
         fontes_ativas.append(f"OLX ({len(olx)})")
 
+    # Fonte 4: CustoJusto (mais leve, sem protecao)
+    print(f"[Scraping] Tentando CustoJusto...")
+    cj = fetch_custojusto_scraping(cidade, max_anuncios=25)
+    if cj:
+        todas_fontes.extend(cj)
+        fontes_ativas.append(f"CustoJusto ({len(cj)})")
+
     # Fallback para demo
     if not todas_fontes:
         print(f"[Fallback] Todas as fontes falharam. Usando dados de demonstracao.")
@@ -1300,6 +1520,7 @@ HTML_TEMPLATE = """
     function atualizarFaculdades() {
         const cidade = document.getElementById('cidadeSelect').value;
         const facSelect = document.getElementById('faculdadeSelect');
+        const facSelecionada = facSelect.value; // guardar selecao atual
         facSelect.innerHTML = '<option value="">-- Escolher faculdade --</option>';
         if (faculdadesPorCidade[cidade]) {
             faculdadesPorCidade[cidade].forEach(fac => {
@@ -1309,18 +1530,21 @@ HTML_TEMPLATE = """
                 facSelect.appendChild(opt);
             });
         }
-    }
-    // Restaurar selecao
-    const facSel = "{{ faculdade_sel }}";
-    if (facSel) {
-        atualizarFaculdades();
-        for (let i = 0; i < facSelect.options.length; i++) {
-            if (facSelect.options[i].value === facSel) {
-                facSelect.selectedIndex = i;
-                break;
+        // Restaurar faculdade se ainda existir nesta cidade
+        const facSalva = "{{ faculdade_sel }}";
+        if (facSalva) {
+            for (let i = 0; i < facSelect.options.length; i++) {
+                if (facSelect.options[i].value === facSalva) {
+                    facSelect.selectedIndex = i;
+                    break;
+                }
             }
         }
     }
+    // Inicializar na pagina
+    document.addEventListener('DOMContentLoaded', function() {
+        atualizarFaculdades();
+    });
     </script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
