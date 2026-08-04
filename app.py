@@ -1,316 +1,599 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-===============================================================================
-UniCasa - Agregador de Quartos para Estudantes
-                    Porto | Lisboa | Coimbra
-===============================================================================
+Aloja-Te — Encontra quarto sem complicações
+Agregador de anúncios de quartos para estudantes em Portugal (Flask, single-file).
 
-INSTALACAO EM WINDOWS:
-1. Abrir o Prompt de Comando (cmd) ou PowerShell
-2. Criar ambiente virtual (recomendado):
-   python -m venv venv
-   venv\Scripts\activate
-3. Instalar dependencias:
-   pip install flask feedparser geopy haversine beautifulsoup4 lxml requests
-   pip install playwright
-   playwright install chromium
-   # OU para Camoufox (browser anti-bot):
-   pip install camoufox
-   python -m camoufox fetch
-4. Executar a aplicacao:
-   python app.py
-5. Abrir o browser em: http://127.0.0.1:5000
-===============================================================================
+Fontes ativas:
+  * Imovirtual  — scraping HTML (principal)
+  * OLX         — scraping HTML
+  * CustoJusto  — JSON embutido do Next.js (__NEXT_DATA__)
+  * Idealista   — via Playwright (Chromium completo, ultrapassa o DataDome)
+
+Desativadas:
+  * HousingAnywhere / Spotahome — renderizam em JavaScript, requerem Camoufox
+
+Se nenhuma fonte retornar resultados, a página mostra o estado vazio com
+mensagem para tentar novamente (sem dados fictícios).
 """
 
-import re
-import math
-import time
-import html
-import random
-import hashlib
-import requests
 import json
-import feedparser
-from datetime import datetime, timedelta
-from urllib.parse import urljoin, urlparse
-from collections import OrderedDict
+import math
+import os
+import re
+import time
+import unicodedata
+from datetime import datetime
 
-from flask import Flask, request, jsonify
-from flask import render_template_string
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+import requests
 from bs4 import BeautifulSoup
+from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
-# =============================================================================
-# CONFIGURACAO DAS FACULDADES POR CIDADE
-# =============================================================================
-CIDADES = {
-    "Porto": OrderedDict([
-        ("FEUP - Polo da Asprela",           {"lat": 41.1785, "lon": -8.5950}),
-        ("FEP - Faculdade de Economia",       {"lat": 41.1620, "lon": -8.6260}),
-        ("FBAUP - Belas Artes",               {"lat": 41.1494, "lon": -8.6130}),
-        ("FAUP - Arquitetura",                {"lat": 41.1470, "lon": -8.6140}),
-        ("FLUP - Letras",                     {"lat": 41.1610, "lon": -8.6000}),
-        ("ISEP - Instituto Superior Engenharia", {"lat": 41.1810, "lon": -8.6040}),
-        ("ESMAE - Escola Musica Artes Espetaculo", {"lat": 41.1480, "lon": -8.6100}),
-        ("Catolica Porto",                    {"lat": 41.1550, "lon": -8.6290}),
-        ("FMUP - Medicina",                   {"lat": 41.1458, "lon": -8.6170}),
-        ("FCUP - Ciencias",                   {"lat": 41.1462, "lon": -8.6165}),
-        ("FDUP - Direito",                    {"lat": 41.1455, "lon": -8.6155}),
-        ("FPCEUP - Psicologia",               {"lat": 41.1468, "lon": -8.6145}),
-        ("FADEUP - Desporto",                 {"lat": 41.1835, "lon": -8.5920}),
-        ("ICBAS - Ciencias Biomedicas",       {"lat": 41.1450, "lon": -8.6180}),
-        ("ESE - Escola Superior Educacao",    {"lat": 41.1600, "lon": -8.6050}),
-        ("ESTSP - Saude do Porto",            {"lat": 41.1555, "lon": -8.6120}),
-        ("ISCAP - Contabilidade e Administracao", {"lat": 41.1590, "lon": -8.6080}),
-    ]),
-    "Lisboa": OrderedDict([
-        ("IST - Alameda",                     {"lat": 38.7368, "lon": -9.1393}),
-        ("IST - Taguspark",                   {"lat": 38.7370, "lon": -9.3030}),
-        ("FCUL - Ciencias",                   {"lat": 38.7560, "lon": -9.1580}),
-        ("FFLUL - Letras",                    {"lat": 38.7520, "lon": -9.1580}),
-        ("FBAUL - Belas Artes",               {"lat": 38.7070, "lon": -9.1450}),
-        ("FMUL - Medicina",                   {"lat": 38.7480, "lon": -9.1590}),
-        ("FDUL - Direito",                    {"lat": 38.7525, "lon": -9.1575}),
-        ("ISEG - Economia",                   {"lat": 38.7065, "lon": -9.1525}),
-        ("ISCTE-IUL",                         {"lat": 38.7480, "lon": -9.1535}),
-        ("FCSH - Ciencias Sociais",           {"lat": 38.7570, "lon": -9.1530}),
-        ("NOVA SBE",                          {"lat": 38.7320, "lon": -9.1490}),
-        ("ISA - Agronomia",                   {"lat": 38.7260, "lon": -9.1830}),
-        ("FMD - Medicina Dentaria",           {"lat": 38.7485, "lon": -9.1585}),
-        ("FARMACIA ULisboa",                  {"lat": 38.7565, "lon": -9.1575}),
-        ("ESAD.CR - Artes",                   {"lat": 38.7100, "lon": -9.1400}),
-        ("Lusofona",                          {"lat": 38.7200, "lon": -9.1450}),
-    ]),
-    "Coimbra": OrderedDict([
-        ("UC - Letras",                       {"lat": 40.2090, "lon": -8.4240}),
-        ("UC - Direito",                      {"lat": 40.2070, "lon": -8.4250}),
-        ("UC - Medicina",                     {"lat": 40.2150, "lon": -8.4100}),
-        ("FCTUC - Ciencias e Tecnologia",     {"lat": 40.1860, "lon": -8.4150}),
-        ("FEUC - Economia",                   {"lat": 40.2050, "lon": -8.4200}),
-        ("FPCE - Psicologia",                 {"lat": 40.2100, "lon": -8.4220}),
-        ("FCDE - Desporto",                   {"lat": 40.2080, "lon": -8.4180}),
-        ("FLUC - Farmacia",                   {"lat": 40.2110, "lon": -8.4230}),
-        ("IPC - Politecnico",                 {"lat": 40.2030, "lon": -8.4180}),
-        ("ESAC - Agraria",                    {"lat": 40.1980, "lon": -8.4250}),
-        ("ISCAC - Contabilidade",             {"lat": 40.2120, "lon": -8.4200}),
-        ("ESTESC - Saude",                    {"lat": 40.2000, "lon": -8.4150}),
-    ]),
+# ---------------------------------------------------------------------------
+# Configuração / otimizações para Render (512MB RAM)
+# ---------------------------------------------------------------------------
+PORT = int(os.environ.get("PORT", 5000))
+CACHE_TTL = 30 * 60          # 30 minutos
+MAX_PAGES = 2                # Imovirtual
+MAX_ARTICLES_PER_PAGE = 25   # artigos por página
+MAX_TOTAL = 200              # limite de anúncios apresentados
+REQUEST_TIMEOUT = 8          # segundos
+MAX_CUSTOJUSTO = 30          # anúncios do CustoJusto
+GEOCODE_NOMINATIM = os.environ.get("GEOCODE_NOMINATIM", "0") == "1"
+# Idealista é bloqueado por DataDome (CAPTCHA/JS) para pedidos simples; o scraper
+# usa Playwright com Chromium completo (channel="chromium") para ultrapassar o
+# challenge. Ativar/desativar com ENABLE_IDEALISTA (default: ativo).
+#   pip install playwright  +  playwright install chromium
+ENABLE_IDEALISTA = os.environ.get("ENABLE_IDEALISTA", "1") == "1"
+
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
 }
 
-NOMES_CIDADES = list(CIDADES.keys())
+# ---------------------------------------------------------------------------
+# Cidades e Faculdades
+# ---------------------------------------------------------------------------
+CIDADES = ["Porto", "Lisboa", "Coimbra"]
+CIDADES_EXTRA = ["Algarve", "Aveiro", "Braga", "Évora", "Vila Real"]
+CIDADES_TODAS = CIDADES + CIDADES_EXTRA
 
-# =============================================================================
-# ZONAS POR CIDADE - CLASSIFICACAO
-# =============================================================================
+CIDADE_SLUG = {"porto": "Porto", "lisboa": "Lisboa", "coimbra": "Coimbra",
+               "vila real": "Vila Real", "aveiro": "Aveiro", "braga": "Braga",
+               "evora": "Évora", "algarve": "Algarve", "faro": "Algarve"}
+
+CIDADE_CENTRO = {
+    "Porto": (41.1579, -8.6291),
+    "Lisboa": (38.7223, -9.1393),
+    "Coimbra": (40.2033, -8.4103),
+    "Vila Real": (41.3008, -7.7441),
+    "Aveiro": (40.6405, -8.6538),
+    "Braga": (41.5454, -8.4265),
+    "Évora": (38.5714, -7.9046),
+    "Algarve": (37.0194, -7.9304),
+}
+
+FACULDADES = {
+    "Porto": [
+        {"nome": "FEUP", "lat": 41.1785, "lon": -8.5950},
+        {"nome": "FEP", "lat": 41.1620, "lon": -8.6260},
+        {"nome": "FBAUP", "lat": 41.1494, "lon": -8.6130},
+        {"nome": "FAUP", "lat": 41.1470, "lon": -8.6140},
+        {"nome": "FLUP", "lat": 41.1610, "lon": -8.6000},
+        {"nome": "ISEP", "lat": 41.1810, "lon": -8.6040},
+        {"nome": "ESMAE", "lat": 41.1480, "lon": -8.6100},
+        {"nome": "Catolica Porto", "lat": 41.1550, "lon": -8.6290},
+        {"nome": "FMUP", "lat": 41.1458, "lon": -8.6170},
+        {"nome": "FCUP", "lat": 41.1462, "lon": -8.6165},
+        {"nome": "FDUP", "lat": 41.1455, "lon": -8.6155},
+        {"nome": "FPCEUP", "lat": 41.1468, "lon": -8.6145},
+        {"nome": "FADEUP", "lat": 41.1835, "lon": -8.5920},
+        {"nome": "ICBAS", "lat": 41.1450, "lon": -8.6180},
+        {"nome": "ESE", "lat": 41.1600, "lon": -8.6050},
+        {"nome": "ESTSP", "lat": 41.1555, "lon": -8.6120},
+        {"nome": "ISCAP", "lat": 41.1590, "lon": -8.6080},
+    ],
+    "Lisboa": [
+        {"nome": "IST Alameda", "lat": 38.7368, "lon": -9.1393},
+        {"nome": "IST Taguspark", "lat": 38.7370, "lon": -9.3030},
+        {"nome": "FCUL", "lat": 38.7560, "lon": -9.1580},
+        {"nome": "FFLUL", "lat": 38.7520, "lon": -9.1580},
+        {"nome": "FBAUL", "lat": 38.7070, "lon": -9.1450},
+        {"nome": "FMUL", "lat": 38.7480, "lon": -9.1590},
+        {"nome": "FDUL", "lat": 38.7525, "lon": -9.1575},
+        {"nome": "ISEG", "lat": 38.7065, "lon": -9.1525},
+        {"nome": "ISCTE-IUL", "lat": 38.7480, "lon": -9.1535},
+        {"nome": "FCSH", "lat": 38.7570, "lon": -9.1530},
+        {"nome": "NOVA SBE", "lat": 38.7320, "lon": -9.1490},
+        {"nome": "ISA", "lat": 38.7260, "lon": -9.1830},
+        {"nome": "FMD", "lat": 38.7485, "lon": -9.1585},
+        {"nome": "FARMACIA ULisboa", "lat": 38.7565, "lon": -9.1575},
+        {"nome": "ESAD.CR", "lat": 38.7100, "lon": -9.1400},
+        {"nome": "Lusofona", "lat": 38.7200, "lon": -9.1450},
+    ],
+    "Coimbra": [
+        {"nome": "UC Letras", "lat": 40.2090, "lon": -8.4240},
+        {"nome": "UC Direito", "lat": 40.2070, "lon": -8.4250},
+        {"nome": "UC Medicina", "lat": 40.2150, "lon": -8.4100},
+        {"nome": "FCTUC", "lat": 40.1860, "lon": -8.4150},
+        {"nome": "FEUC", "lat": 40.2050, "lon": -8.4200},
+        {"nome": "FPCE", "lat": 40.2100, "lon": -8.4220},
+        {"nome": "FCDE", "lat": 40.2080, "lon": -8.4180},
+        {"nome": "FLUC", "lat": 40.2110, "lon": -8.4230},
+        {"nome": "IPC", "lat": 40.2030, "lon": -8.4180},
+        {"nome": "ESAC", "lat": 40.1980, "lon": -8.4250},
+        {"nome": "ISCAC", "lat": 40.2120, "lon": -8.4200},
+        {"nome": "ESTESC", "lat": 40.2000, "lon": -8.4150},
+    ],
+    "Vila Real": [
+        {"nome": "UTAD — Campus Principal", "lat": 41.2837, "lon": -7.7339},
+        {"nome": "UTAD — Polo Desportivo", "lat": 41.2865, "lon": -7.7300},
+    ],
+    "Aveiro": [
+        {"nome": "UA — Campus de Santiago", "lat": 40.6299, "lon": -8.6572},
+        {"nome": "ISCA-UA — Contabilidade", "lat": 40.6400, "lon": -8.6480},
+    ],
+    "Braga": [
+        {"nome": "UMinho — Campus de Gualtar", "lat": 41.5588, "lon": -8.4010},
+        {"nome": "UMinho — Centro (Congregados)", "lat": 41.5507, "lon": -8.4218},
+    ],
+    "Évora": [
+        {"nome": "UÉ — Colégio do Espírito Santo", "lat": 38.5714, "lon": -7.9145},
+        {"nome": "UÉ — Pólo da Mitra", "lat": 38.5328, "lon": -7.9195},
+    ],
+    "Algarve": [
+        {"nome": "UAlg — Campus de Gambelas", "lat": 37.0557, "lon": -7.9761},
+        {"nome": "UAlg — Campus da Penha", "lat": 37.0303, "lon": -7.9398},
+    ],
+}
+
+# Ordem do dropdown de universidades: Porto, Lisboa, Coimbra, depois as restantes
+# por ordem alfabética.
+ORDEM_EXTRA = CIDADES_EXTRA
+UNIVERSIDADES_GRUPOS = [{"cidade": c, "faculdades": FACULDADES.get(c, [])}
+                        for c in CIDADES + ORDEM_EXTRA]
+UNIVERSIDADES = [{"nome": f["nome"], "cidade": g["cidade"],
+                  "lat": f["lat"], "lon": f["lon"]}
+                 for g in UNIVERSIDADES_GRUPOS for f in g["faculdades"]]
+
+# ---------------------------------------------------------------------------
+# Zonas / freguesias com classificações
+#   seguranca (0-10), ruido (0-10, maior=mais barulhento), comercio (0-10),
+#   metro_min / bus_min / comboio_min (min a pé), lat, lon, aliases (keywords)
+# ---------------------------------------------------------------------------
 ZONAS = {
-    "Porto": {
-        "Paranhos": {"seguranca": 8, "ruido": 5, "comercio": 7, "metro_min": 5, "bus_min": 3, "comboio_min": 20, "lat": 41.1750, "lon": -8.6000},
-        "Cedofeita": {"seguranca": 8, "ruido": 7, "comercio": 9, "metro_min": 8, "bus_min": 5, "comboio_min": 15, "lat": 41.1550, "lon": -8.6200},
-        "Bonfim": {"seguranca": 7, "ruido": 6, "comercio": 7, "metro_min": 7, "bus_min": 4, "comboio_min": 12, "lat": 41.1500, "lon": -8.6050},
-        "Ramalde": {"seguranca": 8, "ruido": 4, "comercio": 6, "metro_min": 10, "bus_min": 6, "comboio_min": 18, "lat": 41.1650, "lon": -8.6400},
-        "Aldoar": {"seguranca": 9, "ruido": 3, "comercio": 5, "metro_min": 12, "bus_min": 7, "comboio_min": 22, "lat": 41.1850, "lon": -8.6500},
-        "Massarelos": {"seguranca": 7, "ruido": 6, "comercio": 7, "metro_min": 6, "bus_min": 4, "comboio_min": 10, "lat": 41.1480, "lon": -8.6250},
-        "Miragaia": {"seguranca": 6, "ruido": 7, "comercio": 6, "metro_min": 9, "bus_min": 5, "comboio_min": 14, "lat": 41.1450, "lon": -8.6200},
-        "Foz": {"seguranca": 9, "ruido": 3, "comercio": 6, "metro_min": 15, "bus_min": 8, "comboio_min": 12, "lat": 41.1550, "lon": -8.6750},
-        "Campanha": {"seguranca": 5, "ruido": 7, "comercio": 6, "metro_min": 5, "bus_min": 3, "comboio_min": 3, "lat": 41.1500, "lon": -8.5850},
-        "Boavista": {"seguranca": 8, "ruido": 6, "comercio": 9, "metro_min": 7, "bus_min": 4, "comboio_min": 14, "lat": 41.1580, "lon": -8.6300},
-        "Lordelo do Ouro": {"seguranca": 8, "ruido": 4, "comercio": 6, "metro_min": 11, "bus_min": 6, "comboio_min": 16, "lat": 41.1480, "lon": -8.6400},
-        "Antas": {"seguranca": 7, "ruido": 5, "comercio": 6, "metro_min": 6, "bus_min": 4, "comboio_min": 8, "lat": 41.1550, "lon": -8.5900},
-        "Matosinhos Centro": {"seguranca": 8, "ruido": 5, "comercio": 8, "metro_min": 10, "bus_min": 5, "comboio_min": 18, "lat": 41.1850, "lon": -8.6600},
-        "Maia Centro": {"seguranca": 7, "ruido": 4, "comercio": 7, "metro_min": 14, "bus_min": 8, "comboio_min": 20, "lat": 41.2300, "lon": -8.6200},
-        "Gondomar": {"seguranca": 7, "ruido": 4, "comercio": 5, "metro_min": 16, "bus_min": 9, "comboio_min": 22, "lat": 41.1400, "lon": -8.5300},
-        "Vila Nova de Gaia Centro": {"seguranca": 7, "ruido": 6, "comercio": 8, "metro_min": 8, "bus_min": 5, "comboio_min": 10, "lat": 41.1350, "lon": -8.6100},
-    },
-    "Lisboa": {
-        "Alameda": {"seguranca": 7, "ruido": 7, "comercio": 8, "metro_min": 3, "bus_min": 2, "comboio_min": 15, "lat": 38.7360, "lon": -9.1330},
-        "Avenidas Novas": {"seguranca": 8, "ruido": 6, "comercio": 9, "metro_min": 4, "bus_min": 3, "comboio_min": 10, "lat": 38.7300, "lon": -9.1450},
-        "Saldanha": {"seguranca": 8, "ruido": 7, "comercio": 9, "metro_min": 3, "bus_min": 2, "comboio_min": 8, "lat": 38.7350, "lon": -9.1450},
-        "Arroios": {"seguranca": 6, "ruido": 7, "comercio": 8, "metro_min": 4, "bus_min": 3, "comboio_min": 12, "lat": 38.7250, "lon": -9.1350},
-        "Intendente": {"seguranca": 5, "ruido": 7, "comercio": 7, "metro_min": 3, "bus_min": 2, "comboio_min": 10, "lat": 38.7200, "lon": -9.1350},
-        "Graça": {"seguranca": 6, "ruido": 6, "comercio": 7, "metro_min": 6, "bus_min": 4, "comboio_min": 15, "lat": 38.7150, "lon": -9.1250},
-        "Penha": {"seguranca": 5, "ruido": 6, "comercio": 5, "metro_min": 8, "bus_min": 5, "comboio_min": 18, "lat": 38.7100, "lon": -9.1200},
-        "Belém": {"seguranca": 8, "ruido": 4, "comercio": 6, "metro_min": 12, "bus_min": 6, "comboio_min": 5, "lat": 38.6950, "lon": -9.2000},
-        "Campo Grande": {"seguranca": 7, "ruido": 5, "comercio": 7, "metro_min": 5, "bus_min": 3, "comboio_min": 8, "lat": 38.7600, "lon": -9.1550},
-        "Benfica": {"seguranca": 6, "ruido": 5, "comercio": 6, "metro_min": 8, "bus_min": 5, "comboio_min": 10, "lat": 38.7450, "lon": -9.2000},
-        "Chelas": {"seguranca": 4, "ruido": 7, "comercio": 5, "metro_min": 7, "bus_min": 4, "comboio_min": 15, "lat": 38.7350, "lon": -9.1100},
-        "Alvalade": {"seguranca": 8, "ruido": 5, "comercio": 8, "metro_min": 5, "bus_min": 3, "comboio_min": 8, "lat": 38.7500, "lon": -9.1500},
-        "Parque das Nações": {"seguranca": 9, "ruido": 4, "comercio": 7, "metro_min": 5, "bus_min": 5, "comboio_min": 3, "lat": 38.7600, "lon": -9.0900},
-        "Estrela": {"seguranca": 8, "ruido": 5, "comercio": 8, "metro_min": 6, "bus_min": 4, "comboio_min": 12, "lat": 38.7100, "lon": -9.1550},
-        "Santos": {"seguranca": 7, "ruido": 7, "comercio": 8, "metro_min": 5, "bus_min": 3, "comboio_min": 10, "lat": 38.7050, "lon": -9.1500},
-        "Lapa": {"seguranca": 8, "ruido": 5, "comercio": 7, "metro_min": 7, "bus_min": 4, "comboio_min": 10, "lat": 38.7150, "lon": -9.1600},
-        "Anjos": {"seguranca": 6, "ruido": 7, "comercio": 7, "metro_min": 4, "bus_min": 3, "comboio_min": 10, "lat": 38.7200, "lon": -9.1300},
-    },
-    "Coimbra": {
-        "Alta Universitaria": {"seguranca": 8, "ruido": 4, "comercio": 7, "metro_min": 0, "bus_min": 2, "comboio_min": 20, "lat": 40.2080, "lon": -8.4250},
-        "Baixa": {"seguranca": 7, "ruido": 7, "comercio": 8, "metro_min": 0, "bus_min": 2, "comboio_min": 15, "lat": 40.2100, "lon": -8.4300},
-        "Celas": {"seguranca": 7, "ruido": 5, "comercio": 6, "metro_min": 0, "bus_min": 4, "comboio_min": 10, "lat": 40.2150, "lon": -8.4200},
-        "Santa Clara": {"seguranca": 8, "ruido": 3, "comercio": 5, "metro_min": 0, "bus_min": 5, "comboio_min": 12, "lat": 40.2050, "lon": -8.4400},
-        "Solum": {"seguranca": 7, "ruido": 4, "comercio": 5, "metro_min": 0, "bus_min": 6, "comboio_min": 8, "lat": 40.1950, "lon": -8.4300},
-        "Tovim": {"seguranca": 7, "ruido": 4, "comercio": 4, "metro_min": 0, "bus_min": 7, "comboio_min": 15, "lat": 40.2200, "lon": -8.4150},
-        "Botanica": {"seguranca": 8, "ruido": 3, "comercio": 5, "metro_min": 0, "bus_min": 5, "comboio_min": 18, "lat": 40.2000, "lon": -8.4250},
-        "S. Martinho": {"seguranca": 6, "ruido": 4, "comercio": 4, "metro_min": 0, "bus_min": 8, "comboio_min": 10, "lat": 40.1850, "lon": -8.4400},
-        "Portela": {"seguranca": 7, "ruido": 5, "comercio": 6, "metro_min": 0, "bus_min": 4, "comboio_min": 12, "lat": 40.1950, "lon": -8.4200},
-        "Lousã": {"seguranca": 8, "ruido": 2, "comercio": 4, "metro_min": 0, "bus_min": 10, "comboio_min": 20, "lat": 40.1150, "lon": -8.2500},
-    },
+    "Porto": [
+        {"nome": "Paranhos", "seguranca": 8, "ruido": 5, "comercio": 7,
+         "metro_min": 5, "bus_min": 3, "comboio_min": 20, "lat": 41.1792, "lon": -8.6170,
+         "aliases": ["paranhos", "asprela", "polo universita", "hospital sao joao", "sao joao"]},
+        {"nome": "Cedofeita", "seguranca": 6, "ruido": 8, "comercio": 9,
+         "metro_min": 5, "bus_min": 3, "comboio_min": 15, "lat": 41.1545, "lon": -8.6230,
+         "aliases": ["cedofeita", "miguel bombarda"]},
+        {"nome": "Bonfim", "seguranca": 5, "ruido": 7, "comercio": 7,
+         "metro_min": 10, "bus_min": 5, "comboio_min": 12, "lat": 41.1490, "lon": -8.5980,
+         "aliases": ["bonfim"]},
+        {"nome": "Ramalde", "seguranca": 8, "ruido": 4, "comercio": 6,
+         "metro_min": 15, "bus_min": 6, "comboio_min": 25, "lat": 41.1680, "lon": -8.6450,
+         "aliases": ["ramalde"]},
+        {"nome": "Aldoar", "seguranca": 8, "ruido": 3, "comercio": 5,
+         "metro_min": 20, "bus_min": 8, "comboio_min": 30, "lat": 41.1700, "lon": -8.6600,
+         "aliases": ["aldoar"]},
+        {"nome": "Massarelos", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": 12, "bus_min": 5, "comboio_min": 20, "lat": 41.1540, "lon": -8.6320,
+         "aliases": ["massarelos"]},
+        {"nome": "Miragaia", "seguranca": 6, "ruido": 6, "comercio": 6,
+         "metro_min": 10, "bus_min": 5, "comboio_min": 18, "lat": 41.1430, "lon": -8.6250,
+         "aliases": ["miragaia", "ribeira"]},
+        {"nome": "Foz do Douro", "seguranca": 9, "ruido": 2, "comercio": 5,
+         "metro_min": 25, "bus_min": 10, "comboio_min": 35, "lat": 41.1500, "lon": -8.6750,
+         "aliases": ["foz do douro", "foz"]},
+        {"nome": "Campanhã", "seguranca": 5, "ruido": 6, "comercio": 6,
+         "metro_min": 12, "bus_min": 6, "comboio_min": 5, "lat": 41.1510, "lon": -8.5730,
+         "aliases": ["campanha", "estacao campanha"]},
+        {"nome": "Boavista", "seguranca": 7, "ruido": 6, "comercio": 9,
+         "metro_min": 6, "bus_min": 3, "comboio_min": 15, "lat": 41.1590, "lon": -8.6280,
+         "aliases": ["boavista"]},
+        {"nome": "Lordelo do Ouro", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": 10, "bus_min": 4, "comboio_min": 18, "lat": 41.1580, "lon": -8.6530,
+         "aliases": ["lordelo"]},
+        {"nome": "Antas", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": 4, "bus_min": 3, "comboio_min": 20, "lat": 41.1710, "lon": -8.5900,
+         "aliases": ["antas", "dragao"]},
+        {"nome": "Matosinhos Centro", "seguranca": 7, "ruido": 7, "comercio": 9,
+         "metro_min": 8, "bus_min": 4, "comboio_min": 15, "lat": 41.1800, "lon": -8.6880,
+         "aliases": ["matosinhos", "leixoes"]},
+        {"nome": "Maia Centro", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": 15, "bus_min": 8, "comboio_min": 10, "lat": 41.2350, "lon": -8.6200,
+         "aliases": ["maia"]},
+        {"nome": "Gondomar", "seguranca": 8, "ruido": 3, "comercio": 6,
+         "metro_min": 20, "bus_min": 10, "comboio_min": 15, "lat": 41.1430, "lon": -8.5330,
+         "aliases": ["gondomar"]},
+        {"nome": "Vila Nova de Gaia Centro", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": 10, "bus_min": 5, "comboio_min": 8, "lat": 41.1330, "lon": -8.6100,
+         "aliases": ["vila nova de gaia", "gaia", "afurada", "santa marinha"]},
+    ],
+    "Lisboa": [
+        {"nome": "Alameda", "seguranca": 7, "ruido": 7, "comercio": 8,
+         "metro_min": 3, "bus_min": 2, "comboio_min": 15, "lat": 38.7370, "lon": -9.1330,
+         "aliases": ["alameda"]},
+        {"nome": "Avenidas Novas", "seguranca": 8, "ruido": 5, "comercio": 9,
+         "metro_min": 5, "bus_min": 2, "comboio_min": 12, "lat": 38.7390, "lon": -9.1480,
+         "aliases": ["avenidas novas", "campo pequeno"]},
+        {"nome": "Saldanha", "seguranca": 7, "ruido": 8, "comercio": 10,
+         "metro_min": 2, "bus_min": 2, "comboio_min": 8, "lat": 38.7350, "lon": -9.1450,
+         "aliases": ["saldanha"]},
+        {"nome": "Arroios", "seguranca": 6, "ruido": 7, "comercio": 9,
+         "metro_min": 4, "bus_min": 3, "comboio_min": 10, "lat": 38.7330, "lon": -9.1360,
+         "aliases": ["arroios"]},
+        {"nome": "Intendente", "seguranca": 5, "ruido": 8, "comercio": 8,
+         "metro_min": 4, "bus_min": 3, "comboio_min": 12, "lat": 38.7210, "lon": -9.1390,
+         "aliases": ["intendente"]},
+        {"nome": "Graça", "seguranca": 6, "ruido": 5, "comercio": 6,
+         "metro_min": 10, "bus_min": 5, "comboio_min": 20, "lat": 38.7160, "lon": -9.1340,
+         "aliases": ["graca"]},
+        {"nome": "Penha de França", "seguranca": 6, "ruido": 6, "comercio": 7,
+         "metro_min": 8, "bus_min": 4, "comboio_min": 15, "lat": 38.7200, "lon": -9.1270,
+         "aliases": ["penha de franca", "penha"]},
+        {"nome": "Belém", "seguranca": 9, "ruido": 3, "comercio": 6,
+         "metro_min": 25, "bus_min": 8, "comboio_min": 15, "lat": 38.6980, "lon": -9.2020,
+         "aliases": ["belem"]},
+        {"nome": "Campo Grande", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": 5, "bus_min": 3, "comboio_min": 10, "lat": 38.7590, "lon": -9.1550,
+         "aliases": ["campo grande"]},
+        {"nome": "Benfica", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": 15, "bus_min": 6, "comboio_min": 12, "lat": 38.7510, "lon": -9.2030,
+         "aliases": ["benfica"]},
+        {"nome": "Chelas", "seguranca": 5, "ruido": 6, "comercio": 6,
+         "metro_min": 12, "bus_min": 5, "comboio_min": 20, "lat": 38.7570, "lon": -9.1110,
+         "aliases": ["chelas"]},
+        {"nome": "Alvalade", "seguranca": 8, "ruido": 5, "comercio": 9,
+         "metro_min": 6, "bus_min": 3, "comboio_min": 15, "lat": 38.7540, "lon": -9.1440,
+         "aliases": ["alvalade"]},
+        {"nome": "Parque das Nações", "seguranca": 9, "ruido": 4, "comercio": 8,
+         "metro_min": 10, "bus_min": 5, "comboio_min": 5, "lat": 38.7670, "lon": -9.0940,
+         "aliases": ["parque das nacoes", "oriente", "expo"]},
+        {"nome": "Estrela", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": 12, "bus_min": 5, "comboio_min": 18, "lat": 38.7080, "lon": -9.1630,
+         "aliases": ["estrela"]},
+        {"nome": "Santos", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": 10, "bus_min": 4, "comboio_min": 12, "lat": 38.7070, "lon": -9.1560,
+         "aliases": ["santos"]},
+        {"nome": "Lapa", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": 12, "bus_min": 5, "comboio_min": 15, "lat": 38.7060, "lon": -9.1660,
+         "aliases": ["lapa"]},
+        {"nome": "Anjos", "seguranca": 6, "ruido": 7, "comercio": 9,
+         "metro_min": 4, "bus_min": 3, "comboio_min": 12, "lat": 38.7260, "lon": -9.1360,
+         "aliases": ["anjos"]},
+    ],
+    "Coimbra": [
+        {"nome": "Alta Universitária", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 2, "comboio_min": 20, "lat": 40.2070, "lon": -8.4240,
+         "aliases": ["alta universita", "alta"]},
+        {"nome": "Baixa", "seguranca": 6, "ruido": 7, "comercio": 9,
+         "metro_min": None, "bus_min": 3, "comboio_min": 15, "lat": 40.2080, "lon": -8.4290,
+         "aliases": ["baixa de coimbra", "baixa"]},
+        {"nome": "Celas", "seguranca": 7, "ruido": 5, "comercio": 8,
+         "metro_min": None, "bus_min": 5, "comboio_min": 18, "lat": 40.2140, "lon": -8.4120,
+         "aliases": ["celas", "hospitais da universidade", "huc", "ipo"]},
+        {"nome": "Santa Clara", "seguranca": 8, "ruido": 4, "comercio": 6,
+         "metro_min": None, "bus_min": 10, "comboio_min": 25, "lat": 40.1950, "lon": -8.4420,
+         "aliases": ["santa clara"]},
+        {"nome": "Solum", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": None, "bus_min": 4, "comboio_min": 15, "lat": 40.2140, "lon": -8.4080,
+         "aliases": ["solum"]},
+        {"nome": "Tovim", "seguranca": 6, "ruido": 5, "comercio": 6,
+         "metro_min": None, "bus_min": 8, "comboio_min": 20, "lat": 40.2160, "lon": -8.4050,
+         "aliases": ["tovim", "chao do bispo"]},
+        {"nome": "Botânica", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 6, "comboio_min": 18, "lat": 40.2070, "lon": -8.4170,
+         "aliases": ["botanica", "jardim botanico"]},
+        {"nome": "S. Martinho", "seguranca": 7, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 7, "comboio_min": 20, "lat": 40.2040, "lon": -8.4270,
+         "aliases": ["martinho", "sao martinho"]},
+        {"nome": "Portela", "seguranca": 6, "ruido": 6, "comercio": 7,
+         "metro_min": None, "bus_min": 6, "comboio_min": 18, "lat": 40.2100, "lon": -8.4000,
+         "aliases": ["portela"]},
+        {"nome": "Lousã", "seguranca": 8, "ruido": 2, "comercio": 5,
+         "metro_min": None, "bus_min": 30, "comboio_min": 25, "lat": 40.1130, "lon": -8.2470,
+         "aliases": ["lousa"]},
+    ],
+    # Cidades sem metro: transportes por autocarro (e comboio onde existir estação).
+    "Vila Real": [
+        {"nome": "Centro", "seguranca": 7, "ruido": 6, "comercio": 9,
+         "metro_min": None, "bus_min": 4, "comboio_min": None, "lat": 41.3000, "lon": -7.7440,
+         "aliases": ["centro", "baixa"]},
+        {"nome": "São Pedro", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 5, "comboio_min": None, "lat": 41.3040, "lon": -7.7400,
+         "aliases": ["sao pedro"]},
+        {"nome": "Mateus", "seguranca": 8, "ruido": 4, "comercio": 6,
+         "metro_min": None, "bus_min": 8, "comboio_min": None, "lat": 41.2950, "lon": -7.7150,
+         "aliases": ["mateus", "solar de mateus"]},
+        {"nome": "Folhadela", "seguranca": 8, "ruido": 3, "comercio": 5,
+         "metro_min": None, "bus_min": 6, "comboio_min": None, "lat": 41.2760, "lon": -7.7280,
+         "aliases": ["folhadela"]},
+        {"nome": "Lordelo", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 5, "comboio_min": None, "lat": 41.2950, "lon": -7.7600,
+         "aliases": ["lordelo"]},
+        {"nome": "Parada de Cunhos", "seguranca": 8, "ruido": 3, "comercio": 5,
+         "metro_min": None, "bus_min": 10, "comboio_min": None, "lat": 41.2920, "lon": -7.7260,
+         "aliases": ["parada de cunhos"]},
+        {"nome": "Vila Marim", "seguranca": 8, "ruido": 3, "comercio": 5,
+         "metro_min": None, "bus_min": 12, "comboio_min": None, "lat": 41.2770, "lon": -7.7560,
+         "aliases": ["vila marim"]},
+        {"nome": "Abambres", "seguranca": 8, "ruido": 3, "comercio": 4,
+         "metro_min": None, "bus_min": 12, "comboio_min": None, "lat": 41.3150, "lon": -7.7600,
+         "aliases": ["abambres"]},
+    ],
+    "Aveiro": [
+        {"nome": "Centro", "seguranca": 7, "ruido": 6, "comercio": 9,
+         "metro_min": None, "bus_min": 3, "comboio_min": 10, "lat": 40.6400, "lon": -8.6540,
+         "aliases": ["centro", "baixa"]},
+        {"nome": "Santiago", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 5, "comboio_min": 12, "lat": 40.6299, "lon": -8.6572,
+         "aliases": ["santiago", "campus"]},
+        {"nome": "Esgueira", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 5, "comboio_min": 15, "lat": 40.6520, "lon": -8.6280,
+         "aliases": ["esgueira"]},
+        {"nome": "Glória", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": None, "bus_min": 4, "comboio_min": 10, "lat": 40.6405, "lon": -8.6450,
+         "aliases": ["gloria"]},
+        {"nome": "Vera Cruz", "seguranca": 6, "ruido": 7, "comercio": 9,
+         "metro_min": None, "bus_min": 3, "comboio_min": 8, "lat": 40.6440, "lon": -8.6530,
+         "aliases": ["vera cruz"]},
+        {"nome": "Aradas", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 6, "comboio_min": 12, "lat": 40.6160, "lon": -8.6480,
+         "aliases": ["aradas"]},
+        {"nome": "São Bernardo", "seguranca": 7, "ruido": 4, "comercio": 6,
+         "metro_min": None, "bus_min": 8, "comboio_min": 15, "lat": 40.6260, "lon": -8.6250,
+         "aliases": ["sao bernardo"]},
+        {"nome": "Santa Joana", "seguranca": 7, "ruido": 5, "comercio": 8,
+         "metro_min": None, "bus_min": 5, "comboio_min": 10, "lat": 40.6310, "lon": -8.6400,
+         "aliases": ["santa joana"]},
+        {"nome": "Oliveirinha", "seguranca": 8, "ruido": 3, "comercio": 5,
+         "metro_min": None, "bus_min": 10, "comboio_min": 15, "lat": 40.6070, "lon": -8.5900,
+         "aliases": ["oliveirinha"]},
+        {"nome": "Cacia", "seguranca": 8, "ruido": 3, "comercio": 6,
+         "metro_min": None, "bus_min": 10, "comboio_min": 12, "lat": 40.6780, "lon": -8.6010,
+         "aliases": ["cacia"]},
+    ],
+    "Braga": [
+        {"nome": "Centro", "seguranca": 7, "ruido": 7, "comercio": 10,
+         "metro_min": None, "bus_min": 3, "comboio_min": 10, "lat": 41.5500, "lon": -8.4270,
+         "aliases": ["centro", "baixa"]},
+        {"nome": "Gualtar", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 6, "comboio_min": 15, "lat": 41.5588, "lon": -8.4010,
+         "aliases": ["gualtar", "campus de gualtar"]},
+        {"nome": "São Victor", "seguranca": 7, "ruido": 6, "comercio": 9,
+         "metro_min": None, "bus_min": 4, "comboio_min": 10, "lat": 41.5550, "lon": -8.4200,
+         "aliases": ["sao victor"]},
+        {"nome": "Sé", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": None, "bus_min": 4, "comboio_min": 10, "lat": 41.5490, "lon": -8.4270,
+         "aliases": ["se"]},
+        {"nome": "Real", "seguranca": 7, "ruido": 5, "comercio": 8,
+         "metro_min": None, "bus_min": 5, "comboio_min": 12, "lat": 41.5570, "lon": -8.4120,
+         "aliases": ["real"]},
+        {"nome": "Maximinos", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": None, "bus_min": 5, "comboio_min": 12, "lat": 41.5450, "lon": -8.4320,
+         "aliases": ["maximinos"]},
+        {"nome": "Lomar", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 7, "comboio_min": 15, "lat": 41.5650, "lon": -8.4100,
+         "aliases": ["lomar"]},
+        {"nome": "Tenões", "seguranca": 8, "ruido": 3, "comercio": 6,
+         "metro_min": None, "bus_min": 8, "comboio_min": 18, "lat": 41.5560, "lon": -8.3980,
+         "aliases": ["tenoes"]},
+        {"nome": "Nogueira", "seguranca": 8, "ruido": 4, "comercio": 6,
+         "metro_min": None, "bus_min": 8, "comboio_min": 15, "lat": 41.5350, "lon": -8.4100,
+         "aliases": ["nogueira"]},
+        {"nome": "Ferreiros", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 7, "comboio_min": 15, "lat": 41.5300, "lon": -8.4200,
+         "aliases": ["ferreiros"]},
+    ],
+    "Évora": [
+        {"nome": "Centro Histórico", "seguranca": 7, "ruido": 6, "comercio": 9,
+         "metro_min": None, "bus_min": 4, "comboio_min": 10, "lat": 38.5710, "lon": -7.9100,
+         "aliases": ["centro historico", "centro"]},
+        {"nome": "Canaviais", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 6, "comboio_min": 15, "lat": 38.5600, "lon": -7.9250,
+         "aliases": ["canaviais"]},
+        {"nome": "Malagueira", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 6, "comboio_min": 15, "lat": 38.5650, "lon": -7.9330,
+         "aliases": ["malagueira"]},
+        {"nome": "Senhora da Saúde", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 7, "comboio_min": 15, "lat": 38.5790, "lon": -7.9100,
+         "aliases": ["senhora da saude"]},
+        {"nome": "Horta das Figueiras", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 5, "comboio_min": 12, "lat": 38.5720, "lon": -7.8930,
+         "aliases": ["horta das figueiras"]},
+        {"nome": "Bacelo", "seguranca": 8, "ruido": 4, "comercio": 6,
+         "metro_min": None, "bus_min": 8, "comboio_min": 18, "lat": 38.5660, "lon": -7.8780,
+         "aliases": ["bacelo"]},
+        {"nome": "Mitra", "seguranca": 8, "ruido": 3, "comercio": 5,
+         "metro_min": None, "bus_min": 10, "comboio_min": 20, "lat": 38.5328, "lon": -7.9195,
+         "aliases": ["mitra", "polo da mitra"]},
+    ],
+    "Algarve": [
+        {"nome": "Faro Centro", "seguranca": 7, "ruido": 6, "comercio": 9,
+         "metro_min": None, "bus_min": 4, "comboio_min": 8, "lat": 37.0190, "lon": -7.9320,
+         "aliases": ["faro centro", "centro"]},
+        {"nome": "Gambelas", "seguranca": 8, "ruido": 4, "comercio": 7,
+         "metro_min": None, "bus_min": 6, "comboio_min": 12, "lat": 37.0557, "lon": -7.9761,
+         "aliases": ["gambelas", "campus"]},
+        {"nome": "Penha", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 5, "comboio_min": 12, "lat": 37.0303, "lon": -7.9398,
+         "aliases": ["penha"]},
+        {"nome": "Montenegro", "seguranca": 8, "ruido": 4, "comercio": 6,
+         "metro_min": None, "bus_min": 8, "comboio_min": 10, "lat": 37.0300, "lon": -7.9700,
+         "aliases": ["montenegro"]},
+        {"nome": "Bom João", "seguranca": 7, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 5, "comboio_min": 10, "lat": 37.0180, "lon": -7.9180,
+         "aliases": ["bom joao"]},
+        {"nome": "Olhão", "seguranca": 7, "ruido": 6, "comercio": 8,
+         "metro_min": None, "bus_min": 10, "comboio_min": 15, "lat": 37.0270, "lon": -7.8410,
+         "aliases": ["olhao"]},
+        {"nome": "Portimão", "seguranca": 7, "ruido": 7, "comercio": 9,
+         "metro_min": None, "bus_min": 12, "comboio_min": 15, "lat": 37.1372, "lon": -8.5382,
+         "aliases": ["portimao"]},
+        {"nome": "Loulé", "seguranca": 8, "ruido": 5, "comercio": 8,
+         "metro_min": None, "bus_min": 12, "comboio_min": 18, "lat": 37.1370, "lon": -8.0210,
+         "aliases": ["loule"]},
+        {"nome": "Tavira", "seguranca": 8, "ruido": 5, "comercio": 7,
+         "metro_min": None, "bus_min": 15, "comboio_min": 20, "lat": 37.1260, "lon": -7.6480,
+         "aliases": ["tavira"]},
+    ],
 }
 
-ZONA_KEYWORDS = {
-    "Porto": {
-        "Paranhos": ["paranhos", "polo", "asprela", "hospital sao joao", "s. joao"],
-        "Cedofeita": ["cedofeita", "carlos alberto", "praca parada leitao"],
-        "Bonfim": ["bonfim", "campo 24 de agosto", "conde agueda"],
-        "Ramalde": ["ramalde", "viso", "circunvalacao"],
-        "Aldoar": ["aldoar", "foz do douro", "monte da virgem", "nevogilde"],
-        "Massarelos": ["massarelos", "jardim palacio cristal"],
-        "Miragaia": ["miragaia", "ribeira", "alfandega"],
-        "Foz": ["foz", "passeio alegre", "castelo do queijo"],
-        "Campanha": ["campanha", "campanhã", "estacao campanha", "sao roque"],
-        "Boavista": ["boavista", "praca mouzinho", "casa da musica"],
-        "Lordelo do Ouro": ["lordelo", "afurada", "passeio das virtudes"],
-        "Antas": ["antas", "dragon stadium", "estadio dragao"],
-        "Matosinhos Centro": ["matosinhos", "mercado", "praia"],
-        "Maia Centro": ["maia", "forum maia", "pedras rubras"],
-        "Gondomar": ["gondomar", "rio tinto", "valbom"],
-        "Vila Nova de Gaia Centro": ["gaia", "jardim morro", "caves vinho", "serra pilar"],
-    },
-    "Lisboa": {
-        "Alameda": ["alameda", "arco do cego", "instituto superior tecnico"],
-        "Avenidas Novas": ["avenidas novas", "sao sebastiao", "picoas"],
-        "Saldanha": ["saldanha", "duque de palmela", "fontes pereira"],
-        "Arroios": ["arroios", "anjos", "intendente"],
-        "Intendente": ["intendente", "martim moniz"],
-        "Graça": ["graca", "vila berta", "sao vicente"],
-        "Penha": ["penha", "beato"],
-        "Belém": ["belem", "padrao descobrimentos", "torre belem"],
-        "Campo Grande": ["campo grande", "entrecampos", "zoo"],
-        "Benfica": ["benfica", "estadio da luz", "coloane"],
-        "Chelas": ["chelas", "marvila", "beato"],
-        "Alvalade": ["alvalade", "campo grande", "republica"],
-        "Parque das Nações": ["naccoes", "nations", "orient", "vasco da gama"],
-        "Estrela": ["estrela", "rato", "santos"],
-        "Santos": ["santos", "cais sodre", "lapa"],
-        "Lapa": ["lapa", "estrela", "santo condestavel"],
-        "Anjos": ["anjos", "intendente", "arroios"],
-    },
-    "Coimbra": {
-        "Alta Universitaria": ["alta", "universidade", "paco das escolas", "joanina"],
-        "Baixa": ["baixa", "ferreira borges", "santa cruz"],
-        "Celas": ["celas", "jardim botanico"],
-        "Santa Clara": ["santa clara", "convento", "quinta das lagrimas"],
-        "Solum": ["solum", "downtown"],
-        "Tovim": ["tovim", "cemiterio"],
-        "Botanica": ["botanica", "jardim botanico"],
-        "S. Martinho": ["martinho", "bispo"],
-        "Portela": ["portela", "ponte"],
-        "Lousã": ["lousa", "lousã"],
-    },
-}
+ZONA_BY_NOME = {c: {z["nome"]: z for z in zonas} for c, zonas in ZONAS.items()}
 
-# =============================================================================
-# CACHE GLOBAL (por cidade)
-# =============================================================================
-CACHE = {
-    "Porto": {"anuncios": None, "timestamp": None, "fonte": None},
-    "Lisboa": {"anuncios": None, "timestamp": None, "fonte": None},
-    "Coimbra": {"anuncios": None, "timestamp": None, "fonte": None},
-}
-CACHE_TTL = 30 * 60
-MAX_PAGES = 2
-MAX_PAGES = 5
+# ---------------------------------------------------------------------------
+# Cache em memória (TTL por cidade + profundidade). Chave: "Cidade|paginas"
+# ---------------------------------------------------------------------------
+CACHE = {}
+LIMITE_SCRAPE = 400   # máximo de anúncios guardados em cache por cidade/depth
 
-GEOCODER = Nominatim(user_agent="unicasa_app_v1")
-GEOCODER_CACHE = {}
+# ---------------------------------------------------------------------------
+# Funções auxiliares
+# ---------------------------------------------------------------------------
+def _normalizar(texto):
+    """Remove acentos e passa para minúsculas."""
+    texto = unicodedata.normalize("NFD", str(texto))
+    texto = "".join(ch for ch in texto if unicodedata.category(ch) != "Mn")
+    return texto.lower()
 
-# =============================================================================
-# FUNCOES AUXILIARES
-# =============================================================================
+
+def _slug_cidade(cidade):
+    cidade = _normalizar(cidade)
+    for slug, nome in CIDADE_SLUG.items():
+        if cidade == slug or _normalizar(nome) == cidade:
+            return nome
+    return "Porto"
+
 
 def haversine(lat1, lon1, lat2, lon2):
+    """Distância em linha reta (km) entre dois pontos — fórmula de Haversine."""
     R = 6371.0
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = (math.sin(dphi / 2) ** 2 +
-         math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = (math.sin(dp / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2)
+    return 2 * R * math.asin(math.sqrt(a))
 
 
 def extrair_preco(texto):
+    """Extrai preço em euros (float) de um texto. Lida com separadores de milhar
+    e decimais ('120.000 €', '350,00 €'). Ignora se > 5000 ou inválido."""
     if not texto:
         return None
-    padroes = [
-        r'([\d\.]+,?\d*)\s*[€\s]',
-        r'([\d\.]+,?\d*)\s*EUR',
-        r'€\s*([\d\.]+,?\d*)',
-    ]
-    for padrao in padroes:
-        m = re.search(padrao, texto, re.IGNORECASE)
-        if m:
-            s = m.group(1).replace('.', '').replace(',', '.')
-            try:
-                v = float(s)
-                return v if v < 5000 else None
-            except ValueError:
-                continue
-    return None
+    t = re.sub(r"\s+", " ", texto or "")
+    m = re.search(r"(\d[\d.,]*)\s*(?:€|eur|euros|/m[eê]s|mes)", t, re.IGNORECASE)
+    if not m:
+        m = re.search(r"(?:€|eur)\s*(\d[\d.,]*)", t, re.IGNORECASE)
+    if not m:
+        return None
+    num = m.group(1)
+    if "," in num and "." in num:
+        num = num.replace(".", "").replace(",", ".")   # 1.500,50 -> 1500.50
+    elif "," in num:
+        parte = num.split(",")
+        if len(parte) == 2 and len(parte[1]) <= 2:
+            num = num.replace(",", ".")                 # 350,50 -> 350.50
+        else:
+            num = num.replace(",", "")                  # 1,500 -> 1500
+    else:
+        num = num.replace(".", "")                       # 120.000 -> 120000
+    try:
+        valor = int(float(num))
+    except ValueError:
+        return None
+    if valor <= 0 or valor > 5000:
+        return None
+    return float(valor)
 
 
 def determinar_zona(titulo, descricao, cidade):
-    texto = f"{titulo} {descricao}".lower()
-    keywords = ZONA_KEYWORDS.get(cidade, {})
-    for zona, kws in keywords.items():
-        for kw in kws:
-            if kw in texto:
-                return zona
+    """Corresponde o texto a uma zona por palavras-chave. Retorna o nome ou None."""
+    cidade = _slug_cidade(cidade)
+    texto = _normalizar("%s %s" % (titulo, descricao))
+    for zona in ZONAS.get(cidade, []):
+        for alias in zona["aliases"]:
+            a = _normalizar(alias)
+            if re.search(r"(^|\W)" + re.escape(a) + r"(\W|$)", texto):
+                return zona["nome"]
     return None
 
 
 def geocodificar_endereco(endereco, cidade):
-    if not endereco:
-        return None, None
-    chave = hashlib.md5(f"{endereco}-{cidade}".encode('utf-8')).hexdigest()
-    if chave in GEOCODER_CACHE:
-        return GEOCODER_CACHE[chave]
-    try:
-        loc = GEOCODER.geocode(f"{endereco}, {cidade}, Portugal", timeout=10)
-        if loc:
-            resultado = (loc.latitude, loc.longitude)
-            GEOCODER_CACHE[chave] = resultado
-            return resultado
-    except (GeocoderTimedOut, GeocoderServiceError):
-        pass
+    """(lat, lon) para um endereço. Usa a zona (keywords) como fallback rápido
+    e Nominatim se GEOCODE_NOMINATIM=1. Último recurso: centro da cidade."""
+    cidade = _slug_cidade(cidade)
     zona = determinar_zona(endereco, "", cidade)
-    zonas_cidade = ZONAS.get(cidade, {})
-    if zona and zona in zonas_cidade:
-        z = zonas_cidade[zona]
-        resultado = (z["lat"], z["lon"])
-        GEOCODER_CACHE[chave] = resultado
-        return resultado
-    return None, None
+    if zona:
+        z = ZONA_BY_NOME[cidade][zona]
+        return z["lat"], z["lon"]
+    if GEOCODE_NOMINATIM:
+        try:
+            from geopy.geocoders import Nominatim
+            loc = Nominatim(user_agent="unicasa-search/1.0").geocode(
+                "%s, Portugal" % endereco, timeout=4)
+            if loc:
+                return loc.latitude, loc.longitude
+        except Exception:
+            pass
+    return CIDADE_CENTRO[cidade]
+
+
+def _coord_faculdade(nome, cidade):
+    if not nome:
+        return None
+    alvo = _normalizar(nome)
+    # procura no dropdown global (todas as cidades)
+    for f in UNIVERSIDADES:
+        if _normalizar(f["nome"]) == alvo:
+            return f["lat"], f["lon"]
+    for f in UNIVERSIDADES:
+        if alvo in _normalizar(f["nome"]) or _normalizar(f["nome"]) in alvo:
+            return f["lat"], f["lon"]
+    # fallback: só na cidade atual
+    cidade = _slug_cidade(cidade)
+    for f in FACULDADES.get(cidade, []):
+        if _normalizar(f["nome"]) == alvo:
+            return f["lat"], f["lon"]
+    return None
+
+
+def _cidade_da_faculdade(nome):
+    """Devolve a cidade a que pertence a faculdade escolhida (dropdown global)."""
+    if not nome:
+        return None
+    alvo = _normalizar(nome)
+    for f in UNIVERSIDADES:
+        if _normalizar(f["nome"]) == alvo:
+            return f["cidade"]
+    return None
 
 
 def calcular_distancia_faculdade(lat, lon, faculdade_nome, cidade):
-    if not all([lat, lon, faculdade_nome, cidade]) or cidade not in CIDADES:
+    """Distância (km, 1 casa decimal) do ponto à faculdade. None se não encontrar."""
+    coord = _coord_faculdade(faculdade_nome, cidade)
+    if not coord or lat is None or lon is None:
         return None
-    facs = CIDADES[cidade]
-    if faculdade_nome not in facs:
-        return None
-    f = facs[faculdade_nome]
-    return round(haversine(lat, lon, f["lat"], f["lon"]), 1)
+    return round(haversine(lat, lon, coord[0], coord[1]), 1)
 
 
 def estrelas_html(nota):
-    cheias = int(round(nota / 2))
-    vazias = 5 - cheias
-    return "★" * cheias + "☆" * vazias
+    """Nota 0-10 → string de estrelas (ex: ★★★★☆)."""
+    if nota is None:
+        return "☆☆☆☆☆"
+    cheias = int(round(max(0, min(10, nota)) / 2))
+    return "★" * cheias + "☆" * (5 - cheias)
 
 
 def badge_nota(nota):
+    """Classe CSS da nota: nota-boa (>=8), nota-media (>=5), nota-mau."""
+    if nota is None:
+        return "nota-mau"
     if nota >= 8:
         return "nota-boa"
     if nota >= 5:
@@ -318,1439 +601,1182 @@ def badge_nota(nota):
     return "nota-mau"
 
 
-def extrair_data_disponibilidade(titulo, descricao=""):
-    texto = f"{titulo} {descricao}".lower()
-    meses = {
-        "janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4,
-        "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
-        "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
-        "jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
-        "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12,
-    }
-    ano_atual = datetime.now().year
-
-    padrao1 = re.search(r'dispon[ií]vel\s+(?:a\s+partir\s+de|desde|em|para)\s+(\w+)\s*(\d{4})?', texto, re.IGNORECASE)
-    if padrao1:
-        mes_str = padrao1.group(1).lower()
-        ano_str = padrao1.group(2)
-        if mes_str in meses:
-            ano = int(ano_str) if ano_str else ano_atual
-            return f"Disponivel em {mes_str.capitalize()} {ano}"
-
-    padrao2 = re.search(r'a\s+partir\s+de\s+(\w+)\s*(\d{4})?', texto, re.IGNORECASE)
-    if padrao2:
-        mes_str = padrao2.group(1).lower()
-        ano_str = padrao2.group(2)
-        if mes_str in meses:
-            ano = int(ano_str) if ano_str else ano_atual
-            return f"A partir de {mes_str.capitalize()} {ano}"
-
-    for mes_str, mes_num in meses.items():
-        padrao = re.search(rf'\b{mes_str}\b\.?\s*(\d{{4}})?', texto, re.IGNORECASE)
-        if padrao:
-            ano_str = padrao.group(1)
-            ano = int(ano_str) if ano_str else ano_atual
-            return f"Disponivel em {mes_str.capitalize()} {ano}"
-
-    if re.search(r'\b(imediatamente|pronto|j[aá]\b|dispon[ií]vel\s+j[aá])', texto, re.IGNORECASE):
-        return "Disponivel imediatamente"
-    if re.search(r'\b(entrada\s+imediata|entra\s+j[aá])', texto, re.IGNORECASE):
-        return "Entrada imediata"
-
+def extrair_data_disponibilidade(titulo, descricao):
+    """Deteta 'disponível a partir de Setembro 2026' → 'Disponivel em Setembro 2026',
+    e também 'Disponível em: 31/10/2026'."""
+    texto = _normalizar("%s %s" % (titulo, descricao))
+    # data no formato dd/mm/yyyy
+    m = re.search(r"dispon[ií]vel\s*(?:a\s*partir\s*de|em|para)?\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})", texto)
+    if m:
+        return "Disponivel em " + m.group(1)
+    m = re.search(r"dispon[ií]vel\s*(?:a\s*partir\s*de|em|para)?\s*:?\s*([a-zçãâáéêíóôú]+\s+\d{4})", texto)
+    if m:
+        val = m.group(1).strip()
+        if val and val != "agora":
+            return "Disponivel em " + val.title()
+    if re.search(r"dispon[ií]vel", texto):
+        return "Disponivel"
     return None
 
 
-# =============================================================================
-# WEB SCRAPING - IMOVIRTUAL (fonte principal - funciona bem)
-# =============================================================================
+def _limpar_descricao_idealista(desc):
+    """Remove o boilerplate do Idealista ('Disponível em: 31/10/2026. Reserve em
+    linha... COMO É QUE FUNCIONA... *********') e devolve só o texto útil."""
+    if not desc:
+        return ""
+    d = desc
+    for pat in (r"dispon[ií]vel\s*em\s*:?\s*\d{1,2}/\d{1,2}/\d{4}",
+                r"reserve\s+em\s+linha", r"link\s+adicional",
+                r"como\s+[eé]\s+que\s+funciona", r"\*{3,}"):
+        m = re.search(pat, d, re.IGNORECASE)
+        if m:
+            d = d[:m.start()]
+    d = re.sub(r"\*+", "", d)
+    return _limpar(d)[:220]
 
-def fetch_imovirtual_scraping(cidade, pagina=1):
-    """Faz scraping de uma pagina especifica do Imovirtual."""
-    slug = cidade.lower()
-    if pagina == 1:
-        url = f"https://www.imovirtual.com/pt/resultados/arrendar/quarto/{slug}/{slug}"
-    else:
-        url = f"https://www.imovirtual.com/pt/resultados/arrendar/quarto/{slug}/{slug}?page={pagina}"
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
+
+_MESES_PT = {"janeiro": 1, "fevereiro": 2, "março": 3, "abril": 4, "maio": 5,
+             "junho": 6, "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10,
+             "novembro": 11, "dezembro": 12}
+
+
+def _parse_data_pt(texto):
+    """Converte '23 de julho de 2026' (ou '23/07/2026') em (timestamp, '23/07/2026')."""
+    t = _normalizar(texto)
+    m = re.search(r"(\d{1,2})\s+de\s+([a-zçãâáéêíóôú]+)\s+de\s+(\d{4})", t)
+    if m:
+        dia, mes, ano = int(m.group(1)), _MESES_PT.get(m.group(2)), int(m.group(3))
+        if mes:
+            try:
+                dt = datetime(ano, mes, dia)
+                return dt.timestamp(), dt.strftime("%d/%m/%Y")
+            except ValueError:
+                return None, None
     try:
-        resp = requests.get(url, headers=headers, timeout=8)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-        anuncios = []
-        container = soup.find("div", {"data-cy": "search.listing.organic"})
-        if not container:
-            container = soup
-        articles = container.find_all("article", limit=25)
-        zonas_cidade = ZONAS.get(cidade, {})
-        for art in articles:
-            try:
-                all_ps = art.find_all("p")
-                titulo = f"Quarto em {cidade}"
-                local = cidade
-                for p in all_ps:
-                    txt = p.get_text(strip=True)
-                    if re.match(r'^\d+\s*/\s*\d+$', txt):
-                        continue
-                    if titulo == f"Quarto em {cidade}":
-                        if 'quarto' in txt.lower() or 'alugo' in txt.lower() or 'arrenda' in txt.lower():
-                            titulo = txt
-                            continue
-                    if ',' in txt or any(z.lower() in txt.lower() for z in zonas_cidade):
-                        if txt != titulo:
-                            local = txt
-                            break
+        dt = datetime.strptime(str(texto).strip()[:10], "%d/%m/%Y")
+        return dt.timestamp(), dt.strftime("%d/%m/%Y")
+    except ValueError:
+        return None, None
 
-                link = ""
-                for a in art.find_all("a", href=True):
-                    href = a["href"]
-                    if href.startswith("/pt/anuncio/") or "imovirtual.com" in href:
-                        link = urljoin("https://www.imovirtual.com", href)
-                        break
 
-                preco = None
-                for sp in art.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "€" in txt and "/m" not in txt.lower():
-                        preco = extrair_preco(txt)
-                        if preco:
-                            break
-
-                if preco is None:
-                    continue
-
-                desc = local
-                for sp in art.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "m²" in txt and txt not in desc:
-                        desc += f" | {txt}"
-                        break
-
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower():
-                            zona = z
-                            break
-
-                disponivel = extrair_data_disponibilidade(titulo, desc)
-
-                img = ""
-                img_tag = art.find("img", {"data-cy": "listing-item-image-source"})
-                if img_tag:
-                    img = img_tag.get("src", "")
-                if not img:
-                    img_tag = art.find("img")
-                    if img_tag:
-                        img = img_tag.get("src", "")
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": desc,
-                    "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": disponivel,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "Imovirtual",
-                    "imagem": img,
-                })
-            except Exception:
-                continue
-        return anuncios
-    except Exception as e:
-        print(f"[Scraping] Erro Imovirtual {cidade} pag {pagina}: {e}")
-        return []
-
-
-def fetch_imovirtual_todas_paginas(cidade):
-    """Varre multiplas paginas do Imovirtual e junta os resultados."""
-    todos = []
-    for pagina in range(1, MAX_PAGES + 1):
-        print(f"[Scraping] Imovirtual {cidade} - pagina {pagina}/{MAX_PAGES}...")
-        anuncios = fetch_imovirtual_scraping(cidade, pagina)
-        if not anuncios:
-            print(f"[Scraping] Pagina {pagina} vazia, a parar.")
-            break
-        todos.extend(anuncios)
-        print(f"[Scraping] Pagina {pagina}: {len(anuncios)} anuncios")
-        if pagina < MAX_PAGES:
-            time.sleep(0.5)
-    return todos
-
-
-# =============================================================================
-# WEB SCRAPING - CUSTOJUSTO (via JSON Next.js - nao precisa de Playwright!)
-# =============================================================================
-
-def fetch_custojusto_scraping(cidade, max_anuncios=40):
-    """Extrai anuncios do CustoJusto via JSON embutido do Next.js."""
-    slug = cidade.lower()
-    url = f"https://www.custojusto.pt/{slug}/imobiliario/quartos"
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=8)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        next_data = soup.find("script", id="__NEXT_DATA__")
-        if not next_data:
-            print(f"[CustoJusto] JSON nao encontrado para {cidade}")
-            return []
-
-        data = json.loads(next_data.string)
-        list_items = data.get("props", {}).get("pageProps", {}).get("listItems", [])
-
-        anuncios = []
-        zonas_cidade = ZONAS.get(cidade, {})
-
-        for item in list_items[:max_anuncios]:
-            try:
-                titulo = item.get("title", "")
-                if not titulo:
-                    continue
-
-                preco = item.get("price")
-                if isinstance(preco, str):
-                    preco = preco.replace("€", "").replace(".", "").replace(",", ".").strip()
-                    try:
-                        preco = float(preco)
-                    except ValueError:
-                        continue
-                if not preco or preco < 50 or preco > 5000:
-                    continue
-
-                link = item.get("url", "")
-                if link.startswith("/"):
-                    link = f"https://www.custojusto.pt{link}"
-
-                desc = item.get("body", "")[:200]
-
-                loc_data = item.get("locationNames", {})
-                local = ""
-                if isinstance(loc_data, dict):
-                    parts = []
-                    for key in ["parish", "county", "district"]:
-                        if loc_data.get(key):
-                            parts.append(loc_data[key])
-                    local = ", ".join(parts)
-                elif isinstance(loc_data, list) and loc_data:
-                    local = ", ".join(str(x) for x in loc_data)
-                if not local:
-                    local = cidade
-
-                img = item.get("imageFullURL", "")
-                list_time = item.get("listTime", "")
-
-                zona = determinar_zona(titulo, desc + " " + local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower() or z.lower() in titulo.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": desc or local,
-                    "link": link,
-                    "data": list_time or datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": None,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "CustoJusto",
-                    "imagem": img,
-                })
-            except Exception:
-                continue
-
-        print(f"[CustoJusto] {cidade}: {len(anuncios)} anuncios")
-        return anuncios
-
-    except Exception as e:
-        print(f"[CustoJusto] Erro {cidade}: {e}")
-        return []
-
-
-# =============================================================================
-# OUTRAS FONTES — desativadas (usam JS pesado ou anti-bot)
-# =============================================================================
-
-def fetch_housinganywhere(cidade, max_anuncios=20):
-    """HousingAnywhere — desativado (renderiza em JS)."""
-    return []
-
-
-def fetch_spotahome(cidade, max_anuncios=20):
-    """Spotahome — desativado (renderiza em JS)."""
-    return []
-
-
-def fetch_uniplaces_scraping(cidade, max_anuncios=20):
-    return []
-
-
-def fetch_erasmusinn_scraping(cidade, max_anuncios=20):
-    return []
-
-
-# =============================================================================
-# TENTATIVA IDEALISTA / OLX (protegidos por anti-bot)
-# =============================================================================
-
-def fetch_idealista_scraping(cidade):
-    """Tentativa de scraping do Idealista. Nota: usa DataDome CAPTCHA."""
-    print(f"[Idealista] Aviso: Idealista usa protecao DataDome. Tentativa pode falhar.")
-    return []
-
-
-def fetch_olx_scraping(cidade):
-    """Tentativa de scraping do OLX. Nota: usa Cloudflare."""
-    print(f"[OLX] Aviso: OLX usa protecao Cloudflare. Tentativa pode falhar.")
-    return []
-
-
-# =============================================================================
-# DADOS DE DEMONSTRACAO (fallback final, por cidade)
-# =============================================================================
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-        anuncios = []
-        container = soup.find("div", {"data-cy": "search.listing.organic"})
-        if not container:
-            container = soup
-        articles = container.find_all("article", limit=40)
-        zonas_cidade = ZONAS.get(cidade, {})
-        for art in articles:
-            try:
-                all_ps = art.find_all("p")
-                titulo = f"Quarto em {cidade}"
-                local = cidade
-                for p in all_ps:
-                    txt = p.get_text(strip=True)
-                    if re.match(r'^\d+\s*/\s*\d+$', txt):
-                        continue
-                    if titulo == f"Quarto em {cidade}":
-                        if 'quarto' in txt.lower() or 'alugo' in txt.lower() or 'arrenda' in txt.lower():
-                            titulo = txt
-                            continue
-                    if ',' in txt or any(z.lower() in txt.lower() for z in zonas_cidade):
-                        if txt != titulo:
-                            local = txt
-                            break
-
-                link = ""
-                for a in art.find_all("a", href=True):
-                    href = a["href"]
-                    if href.startswith("/pt/anuncio/") or "imovirtual.com" in href:
-                        link = urljoin("https://www.imovirtual.com", href)
-                        break
-
-                preco = None
-                for sp in art.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "€" in txt and "/m" not in txt.lower():
-                        preco = extrair_preco(txt)
-                        if preco:
-                            break
-
-                if preco is None:
-                    continue
-
-                desc = local
-                for sp in art.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if "m²" in txt and txt not in desc:
-                        desc += f" | {txt}"
-                        break
-
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower():
-                            zona = z
-                            break
-
-                disponivel = extrair_data_disponibilidade(titulo, desc)
-
-                img = ""
-                img_tag = art.find("img", {"data-cy": "listing-item-image-source"})
-                if img_tag:
-                    img = img_tag.get("src", "")
-                if not img:
-                    img_tag = art.find("img")
-                    if img_tag:
-                        img = img_tag.get("src", "")
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": desc,
-                    "link": link,
-                    "data": datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": disponivel,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "Imovirtual",
-                    "imagem": img,
-                })
-            except Exception:
-                continue
-        return anuncios
-    except Exception as e:
-        print(f"[Scraping] Erro Imovirtual {cidade} pag {pagina}: {e}")
-        return []
-
-
-def fetch_imovirtual_todas_paginas(cidade):
-    """Varre multiplas paginas do Imovirtual e junta os resultados."""
-    todos = []
-    for pagina in range(1, MAX_PAGES + 1):
-        print(f"[Scraping] Imovirtual {cidade} - pagina {pagina}/{MAX_PAGES}...")
-        anuncios = fetch_imovirtual_scraping(cidade, pagina)
-        if not anuncios:
-            print(f"[Scraping] Pagina {pagina} vazia, a parar.")
-            break
-        todos.extend(anuncios)
-        print(f"[Scraping] Pagina {pagina}: {len(anuncios)} anuncios")
-        if pagina < MAX_PAGES:
-            time.sleep(0.5)
-    return todos
-
-
-# =============================================================================
-# WEB SCRAPING - CUSTOJUSTO (via JSON Next.js - nao precisa de Playwright!)
-# =============================================================================
-
-def fetch_custojusto_scraping(cidade, max_anuncios=40):
-    """Extrai anuncios do CustoJusto via JSON embutido do Next.js."""
-    slug = cidade.lower()
-    url = f"https://www.custojusto.pt/{slug}/imobiliario/quartos"
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        next_data = soup.find("script", id="__NEXT_DATA__")
-        if not next_data:
-            print(f"[CustoJusto] JSON nao encontrado para {cidade}")
-            return []
-
-        data = json.loads(next_data.string)
-        list_items = data.get("props", {}).get("pageProps", {}).get("listItems", [])
-
-        anuncios = []
-        zonas_cidade = ZONAS.get(cidade, {})
-
-        for item in list_items[:max_anuncios]:
-            try:
-                titulo = item.get("title", "")
-                if not titulo:
-                    continue
-
-                preco = item.get("price")
-                if isinstance(preco, str):
-                    preco = preco.replace("€", "").replace(".", "").replace(",", ".").strip()
-                    try:
-                        preco = float(preco)
-                    except ValueError:
-                        continue
-                if not preco or preco < 50 or preco > 5000:
-                    continue
-
-                link = item.get("url", "")
-                if link.startswith("/"):
-                    link = f"https://www.custojusto.pt{link}"
-
-                desc = item.get("body", "")[:200]
-
-                loc_data = item.get("locationNames", {})
-                local = ""
-                if isinstance(loc_data, dict):
-                    parts = []
-                    for key in ["parish", "county", "district"]:
-                        if loc_data.get(key):
-                            parts.append(loc_data[key])
-                    local = ", ".join(parts)
-                elif isinstance(loc_data, list) and loc_data:
-                    local = ", ".join(str(x) for x in loc_data)
-                if not local:
-                    local = cidade
-
-                img = item.get("imageFullURL", "")
-                list_time = item.get("listTime", "")
-
-                zona = determinar_zona(titulo, desc + " " + local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower() or z.lower() in titulo.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo,
-                    "preco": preco,
-                    "descricao": desc or local,
-                    "link": link,
-                    "data": list_time or datetime.now().strftime("%Y-%m-%d"),
-                    "disponivel": None,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "CustoJusto",
-                    "imagem": img,
-                })
-            except Exception:
-                continue
-
-        print(f"[CustoJusto] {cidade}: {len(anuncios)} anuncios")
-        return anuncios
-
-    except Exception as e:
-        print(f"[CustoJusto] Erro {cidade}: {e}")
-        return []
-
-
-# =============================================================================
-# UNIPLACES (desativado - site usa JS pesado)
-# =============================================================================
-
-def fetch_uniplaces_scraping(cidade, max_anuncios=20):
-    return []
-
-
-# =============================================================================
-# ERASMUSINN (desativado - 404)
-# =============================================================================
-
-def fetch_erasmusinn_scraping(cidade, max_anuncios=20):
-    return []
-
-
-
-
-# =============================================================================
-# WEB SCRAPING - HOUSINGANYWHERE (popular entre estudantes Erasmus)
-# =============================================================================
-
-def fetch_housinganywhere(cidade, max_anuncios=20):
-    """Extrai anuncios do HousingAnywhere - muito popular entre estudantes."""
-    urls = {
-        "Porto": "https://housinganywhere.com/Porto--Portugal",
-        "Lisboa": "https://housinganywhere.com/Lisbon--Portugal",
-        "Coimbra": "https://housinganywhere.com/Coimbra--Portugal",
-    }
-    url = urls.get(cidade)
-    if not url:
-        return []
-
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        links = soup.find_all("a", href=re.compile(r"/room/"))
-        anuncios = []
-        vistos = set()
-        zonas_cidade = ZONAS.get(cidade, {})
-
-        for a in links[:max_anuncios]:
-            try:
-                href = a.get("href", "")
-                if href in vistos:
-                    continue
-                vistos.add(href)
-
-                if not href.startswith("http"):
-                    link = "https://housinganywhere.com" + href
-                else:
-                    link = href
-
-                txt = a.get_text(strip=True)
-
-                # Extrair preco - formato: €1050/month
-                preco = None
-                m = re.search(r'€([\d\s]+)/month', txt)
-                if m:
-                    s = m.group(1).replace(' ', '').replace('.', '').replace(',', '.')
-                    try:
-                        preco = float(s)
-                    except ValueError:
-                        continue
-                if not preco or preco < 100 or preco > 5000:
-                    continue
-
-                # Titulo - texto antes do preco
-                titulo = txt[:200]
-
-                # Localizacao
-                local = cidade
-                m2 = re.search(r'(?:in|Private room in|Studio in|Apartment in|House in)\s+([^€•]+?)(?:\d+\s*m²|•|$)', txt, re.IGNORECASE)
-                if m2:
-                    local = m2.group(1).strip()[:80]
-
-                # Disponibilidade
-                disp = None
-                m3 = re.search(r'Available\s+(now|from\s+\d+\s+\w+|from\s+\w+)', txt, re.IGNORECASE)
-                if m3:
-                    disp = "Disponivel " + m3.group(1)
-
-                # Zona
-                zona = determinar_zona(titulo, local, cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in local.lower() or z.lower() in titulo.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo[:120],
-                    "preco": preco,
-                    "descricao": local,
-                    "link": link,
-                    "data": "",
-                    "disponivel": disp,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "HousingAnywhere",
-                })
-            except Exception:
-                continue
-
-        print(f"[HousingAnywhere] {cidade}: {len(anuncios)} anuncios")
-        return anuncios
-
-    except Exception as e:
-        print(f"[HousingAnywhere] Erro {cidade}: {e}")
-        return []
-
-
-# =============================================================================
-# WEB SCRAPING - SPOTAHOME (quartos verificados para estudantes)
-# =============================================================================
-
-def fetch_spotahome(cidade, max_anuncios=20):
-    """Extrai anuncios do Spotahome - quartos verificados."""
-    urls = {
-        "Porto": "https://www.spotahome.com/s/porto--pt",
-        "Lisboa": "https://www.spotahome.com/s/lisbon--pt",
-        "Coimbra": "https://www.spotahome.com/s/coimbra--pt",
-    }
-    url = urls.get(cidade)
-    if not url:
-        return []
-
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # Spotahome usa links /for-rent:rooms/
-        links = soup.find_all("a", href=re.compile(r"/for-rent:rooms/"))
-        anuncios = []
-        vistos = set()
-        zonas_cidade = ZONAS.get(cidade, {})
-
-        for a in links[:max_anuncios]:
-            try:
-                href = a.get("href", "")
-                if href in vistos:
-                    continue
-                vistos.add(href)
-
-                if href.startswith("/"):
-                    link = "https://www.spotahome.com" + href
-                else:
-                    link = href
-
-                txt = a.get_text(strip=True)
-                if not txt or len(txt) < 10:
-                    continue
-
-                # Preco
-                preco = None
-                for padrao in [r'€\s*([\d\.]+)', r'([\d\.]+)\s*€']:
-                    m = re.search(padrao, txt, re.IGNORECASE)
-                    if m:
-                        s = m.group(1).replace('.', '').replace(',', '.')
-                        try:
-                            preco = float(s)
-                            break
-                        except ValueError:
-                            continue
-
-                if not preco or preco < 100 or preco > 5000:
-                    continue
-
-                # Titulo - limpar texto
-                titulo = txt[:150]
-
-                # Disponibilidade
-                disp = None
-                m = re.search(r'Dispon[ií]vel\s+(\d+\s+\w+|agora|j[aá])', txt, re.IGNORECASE)
-                if m:
-                    disp = "Disponivel " + m.group(1)
-
-                # Zona
-                zona = determinar_zona(titulo, "", cidade)
-                if not zona:
-                    for z in zonas_cidade:
-                        if z.lower() in titulo.lower():
-                            zona = z
-                            break
-
-                lat, lon = None, None
-                if zona and zona in zonas_cidade:
-                    zd = zonas_cidade[zona]
-                    lat, lon = zd["lat"], zd["lon"]
-
-                anuncios.append({
-                    "titulo": titulo[:120],
-                    "preco": preco,
-                    "descricao": f"Quarto verificado em {cidade}",
-                    "link": link,
-                    "data": "",
-                    "disponivel": disp,
-                    "lat": lat,
-                    "lon": lon,
-                    "zona": zona,
-                    "fonte": "Spotahome",
-                })
-            except Exception:
-                continue
-
-        print(f"[Spotahome] {cidade}: {len(anuncios)} anuncios")
-        return anuncios
-
-    except Exception as e:
-        print(f"[Spotahome] Erro {cidade}: {e}")
-        return []
-
-
-# =============================================================================
-# TENTATIVA IDEALISTA / OLX (protegidos por anti-bot)
-# ============================================================================= / OLX (protegidos por anti-bot)
-# =============================================================================
-
-def fetch_idealista_scraping(cidade):
-    """Tentativa de scraping do Idealista. Nota: usa DataDome CAPTCHA."""
-    print(f"[Idealista] Aviso: Idealista usa protecao DataDome. Tentativa pode falhar.")
-    return []
-
-
-def fetch_olx_scraping(cidade):
-    """Tentativa de scraping do OLX. Nota: usa Cloudflare."""
-    print(f"[OLX] Aviso: OLX usa protecao Cloudflare. Tentativa pode falhar.")
-    return []
-
-
-# =============================================================================
-# DADOS DE DEMONSTRACAO (fallback final, por cidade)
-# =============================================================================
-
-def get_demo_data(cidade):
-    demos = []
-    zonas_cidade = ZONAS.get(cidade, {})
-    if not zonas_cidade:
-        return demos
-    nomes_zonas = list(zonas_cidade.keys())
-
-    if cidade == "Porto":
-        titulos = [
-            "Quarto espacoso junto ao Polo da Asprela",
-            "Quarto mobilado na Boavista com transportes",
-            "Quarto individual em apartamento partilhado - Cedofeita",
-            "Quarto na Foz com vista para o mar",
-            "Quarto economico proximo do Campanha",
-        ]
-        precos = [250, 300, 275, 400, 220]
-    elif cidade == "Lisboa":
-        titulos = [
-            "Quarto junto ao IST Alameda",
-            "Quarto em Alvalade proximo metro",
-            "Quarto na Avenidas Novas com varanda",
-            "Quarto economico Intendente",
-            "Quarto em Belem mobilado",
-        ]
-        precos = [350, 400, 450, 280, 320]
-    else:
-        titulos = [
-            "Quarto na Alta Universitaria",
-            "Quarto mobilado junto a UC",
-            "Quarto em Celas com transportes",
-            "Quarto economico Santa Clara",
-            "Quarto em apartamento partilhado - Baixa",
-        ]
-        precos = [200, 220, 180, 160, 190]
-
-    for i in range(min(10, len(nomes_zonas))):
-        zona = nomes_zonas[i % len(nomes_zonas)]
-        zd = zonas_cidade[zona]
-        demos.append({
-            "titulo": titulos[i % len(titulos)],
-            "preco": precos[i % len(precos)],
-            "descricao": f"Excelente quarto para estudante em {zona}, {cidade}.",
-            "link": "#",
-            "data": datetime.now().strftime("%Y-%m-%d"),
-            "disponivel": None,
-            "lat": zd["lat"],
-            "lon": zd["lon"],
-            "zona": zona,
-            "fonte": "Dados de demonstracao",
-        })
-    return demos
-
-
-# =============================================================================
-# CARREGAMENTO COMBINADO (multiplas fontes)
-# =============================================================================
-
-def carregar_anuncios(cidade):
+def _data_ts(texto):
+    """Timestamp a partir de datas relativas ('hoje', 'ontem', 'há X dias') ou ISO."""
     agora = time.time()
-    cache = CACHE.get(cidade, {"anuncios": None, "timestamp": None, "fonte": None})
-    if cache["anuncios"] and cache["timestamp"] and (agora - cache["timestamp"] < CACHE_TTL):
-        return cache["anuncios"], cache["fonte"]
+    if not texto:
+        return agora
+    t = _normalizar(texto)
+    if re.search(r"\bhoje\b", t):
+        return agora
+    if re.search(r"\bontem\b", t):
+        return agora - 86400
+    m = re.search(r"h[aá]\s+(\d+)\s*(dias?|horas?|min)", t)
+    if m:
+        n = int(m.group(1))
+        unidade = m.group(2)
+        seg = {"dia": 86400, "dias": 86400, "hora": 3600, "horas": 3600,
+               "min": 60}[unidade] if unidade in {"dia", "dias", "hora", "horas", "min"} else 86400
+        return agora - n * seg
+    ts, _disp = _parse_data_pt(texto)
+    if ts:
+        return ts
+    try:
+        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z"):
+            try:
+                return datetime.strptime(str(texto)[:19], fmt).timestamp()
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return agora
 
-    print(f"[Cache] Atualizando dados para {cidade}...")
-    fontes_dict = {}   # fonte_nome -> lista de anuncios
-    fontes_ativas = []
 
-    # Fonte 1: Imovirtual (mais confiavel)
-    print(f"[Scraping] A tentar Imovirtual (ate {MAX_PAGES} paginas)...")
-    imovirtual = fetch_imovirtual_todas_paginas(cidade)
-    if imovirtual:
-        fontes_dict["Imovirtual"] = imovirtual
-        fontes_ativas.append(f"Imovirtual ({len(imovirtual)})")
+def _limpar(texto):
+    return re.sub(r"\s+", " ", texto or "").strip()
 
-    # Fonte 2: CustoJusto (via JSON Next.js)
-    print(f"[Scraping] A tentar CustoJusto...")
-    cj = fetch_custojusto_scraping(cidade, max_anuncios=30)
-    if cj:
-        fontes_dict["CustoJusto"] = cj
-        fontes_ativas.append(f"CustoJusto ({len(cj)})")
 
-    # Fallback para demo
-    if not fontes_dict:
-        print(f"[Fallback] Todas as fontes falharam. A usar dados de demonstracao.")
-        fontes_dict["Demo"] = get_demo_data(cidade)
-        fontes_ativas = ["Dados de demonstracao"]
+# Cidades/distritos portugueses (para filtrar anúncios fora da cidade pesquisada).
+# Nota: zonas da área metropolitana do Porto (Gaia, Maia, Matosinhos, Gondomar)
+# estão de propósito fora desta lista para não serem rejeitadas.
+OUTRAS_CIDADES = [
+    "viseu", "aveiro", "braga", "braganca", "castelo branco", "coimbra",
+    "evora", "faro", "guarda", "leiria", "lisboa", "portalegre", "santarem",
+    "setubal", "viana do castelo", "vila real", "portimao", "algarve",
+    "guimaraes", "covilha", "lamego", "figueira da foz", "peniche", "nazare",
+    "caldas da rainha", "torres vedras", "sintra", "cascais", "amadora",
+    "loures", "seixal", "almada", "odivelas", "oeiras", "esposende",
+]
 
-    # Remove duplicados DENTRO de cada fonte
-    for fonte_nome, lista in fontes_dict.items():
-        vistos = set()
-        unicos = []
-        for a in lista:
-            key = a.get("link", "") or a.get("titulo", "")
-            if key and key not in vistos:
-                vistos.add(key)
-                unicos.append(a)
-        fontes_dict[fonte_nome] = unicos
+# Tokens válidos por cidade (não devem ser tratados como "outra cidade").
+CIDADE_TOKEN = {
+    "Porto": {"porto", "gaia", "vila nova de gaia", "matosinhos", "maia", "gondomar"},
+    "Lisboa": {"lisboa"},
+    "Coimbra": {"coimbra"},
+    "Vila Real": {"vila real"},
+    "Aveiro": {"aveiro"},
+    "Braga": {"braga"},
+    "Évora": {"evora"},
+    "Algarve": {"algarve", "faro", "portimao", "loule", "olhao", "tavira",
+                "albufeira", "lagos", "lagoa", "silves", "vilamoura", "quarteira"},
+}
 
-    # INTERLEAVE round-robin: misturar fontes 1-a-1 para nao ficar tudo de uma fonte junto
-    todas_fontes = []
-    nomes_fontes = list(fontes_dict.keys())
-    indices = {nome: 0 for nome in nomes_fontes}
 
-    while True:
-        algum_adicionado = False
-        for nome in nomes_fontes:
-            lista = fontes_dict[nome]
-            idx = indices[nome]
-            if idx < len(lista):
-                todas_fontes.append(lista[idx])
-                indices[nome] = idx + 1
-                algum_adicionado = True
-        if not algum_adicionado:
+def _fora_da_cidade(texto, cidade):
+    """True se o texto referencia claramente outra cidade/distrito (ex: uma casa
+    de Viseu a aparecer na pesquisa de Porto)."""
+    t = _normalizar(texto)
+    validos = CIDADE_TOKEN.get(cidade, {_normalizar(cidade)})
+    for c in OUTRAS_CIDADES:
+        if c in validos:
+            continue
+        if re.search(r"(^|\W)" + re.escape(c) + r"(\W|$)", t):
+            return True
+    return False
+
+
+def _criar_anuncio(titulo, preco, link, data_texto, descricao, imagem, fonte, cidade,
+                   disponibilidade=None):
+    if preco is None:
+        return None
+    texto = "%s %s" % (titulo, descricao)
+    if _fora_da_cidade(texto, cidade):
+        return None
+    lat, lon = geocodificar_endereco(texto, cidade)
+    zona = determinar_zona(titulo, descricao, cidade)
+    return {
+        "titulo": _limpar(titulo),
+        "preco": float(preco),
+        "link": _limpar(link),
+        "data": _limpar(data_texto) or "Hoje",
+        "data_ts": _data_ts(data_texto),
+        "disponibilidade": disponibilidade,
+        "imagem": _limpar(imagem),
+        "fonte": fonte,
+        "zona": zona,
+        "lat": lat,
+        "lon": lon,
+        "descricao": _limpar(descricao),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Scraping
+# ---------------------------------------------------------------------------
+def _obter(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
+            r.encoding = r.apparent_encoding or "utf-8"
+            return r.text
+    except requests.RequestException:
+        return None
+    return None
+
+
+IMOVIRTUAL_URLS = {
+    "porto": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/porto/porto",
+    "lisboa": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/lisboa/lisboa",
+    "coimbra": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/coimbra/coimbra",
+    "vila real": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/vila-real/vila-real",
+    "aveiro": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/aveiro/aveiro",
+    "braga": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/braga/braga",
+    "evora": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/evora/evora",
+    "algarve": "https://www.imovirtual.com/pt/resultados/arrendar/quarto/faro/",
+}
+
+
+def _imo_data_anuncio(texto_card):
+    t = _normalizar(texto_card)
+    if re.search(r"adicionado\w*\s+hoje", t):
+        return "Hoje"
+    if re.search(r"adicionado\w*\s+ontem", t):
+        return "Ontem"
+    m = re.search(r"adicionado\w*\s+h[aá]\s+(\d+)\s*(dias?|horas?)", t)
+    if m:
+        return "há %s %s" % (m.group(1), m.group(2))
+    return ""
+
+
+def scrape_imovirtual(cidade, paginas=MAX_PAGES):
+    """Scraping HTML do Imovirtual (página de quartos), N páginas × 25."""
+    cidade = _slug_cidade(cidade)
+    base = IMOVIRTUAL_URLS.get(_normalizar(cidade))
+    if not base:
+        return []
+    anuncios = []
+    for pagina in range(1, paginas + 1):
+        url = base
+        if pagina > 1:
+            url += ("&" if "?" in url else "?") + "page=%d" % pagina
+        html = _obter(url)
+        if not html:
             break
-
-    # LIMITAR a 100 anuncios para economizar memoria no Render (512MB)
-    if len(todas_fontes) > 100:
-        todas_fontes = todas_fontes[:100]
-        print(f"[Cache] Limitado a 100 anuncios (de {len(todas_fontes) + sum(1 for nome in nomes_fontes for i in range(indices[nome], len(fontes_dict[nome])))} total)")
-
-    fonte_str = " + ".join(fontes_ativas)
-    print(f"[Scraping] A tentar CustoJusto...")
-    cj = fetch_custojusto_scraping(cidade, max_anuncios=40)
-    if cj:
-        fontes_dict["CustoJusto"] = cj
-        fontes_ativas.append(f"CustoJusto ({len(cj)})")
-
-    # Fonte 3: HousingAnywhere
-    print(f"[Scraping] A tentar HousingAnywhere...")
-    ha = fetch_housinganywhere(cidade, max_anuncios=20)
-    if ha:
-        fontes_dict["HousingAnywhere"] = ha
-        fontes_ativas.append(f"HousingAnywhere ({len(ha)})")
-
-    # Fonte 4: Spotahome
-    print(f"[Scraping] A tentar Spotahome...")
-    sp = fetch_spotahome(cidade, max_anuncios=20)
-    if sp:
-        fontes_dict["Spotahome"] = sp
-        fontes_ativas.append(f"Spotahome ({len(sp)})")
-
-    # Fallback para demo
-    if not fontes_dict:
-        print(f"[Fallback] Todas as fontes falharam. A usar dados de demonstracao.")
-        fontes_dict["Demo"] = get_demo_data(cidade)
-        fontes_ativas = ["Dados de demonstracao"]
-
-    # Remove duplicados DENTRO de cada fonte
-    for fonte_nome, lista in fontes_dict.items():
-        vistos = set()
-        unicos = []
-        for a in lista:
-            key = a.get("link", "") or a.get("titulo", "")
-            if key and key not in vistos:
-                vistos.add(key)
-                unicos.append(a)
-        fontes_dict[fonte_nome] = unicos
-
-    # INTERLEAVE round-robin: misturar fontes 1-a-1 para nao ficar tudo de uma fonte junto
-    todas_fontes = []
-    nomes_fontes = list(fontes_dict.keys())
-    indices = {nome: 0 for nome in nomes_fontes}
-
-    while True:
-        algum_adicionado = False
-        for nome in nomes_fontes:
-            lista = fontes_dict[nome]
-            idx = indices[nome]
-            if idx < len(lista):
-                todas_fontes.append(lista[idx])
-                indices[nome] = idx + 1
-                algum_adicionado = True
-        if not algum_adicionado:
+        soup = BeautifulSoup(html, "lxml")
+        itens = [art for art in soup.find_all("article")
+                 if art.select_one('[data-cy="listing-item-link"]')]
+        if not itens:
+            itens = soup.select('div[data-cy="search.listing.organic"] article')
+        itens = itens[:MAX_ARTICLES_PER_PAGE]
+        if not itens:
             break
+        for item in itens:
+            link_el = (item.select_one('[data-cy="listing-item-link"]')
+                       or item.select_one('a[href*="/pt/anuncio/"]')
+                       or item.find("a", href=True))
+            if not link_el:
+                continue
+            link = link_el.get("href", "") or ""
+            if link.startswith("/"):
+                link = "https://www.imovirtual.com" + link
+            titulo = _limpar(item.select_one('[data-cy="listing-item-title"]').get_text(" ", strip=True)
+                             if item.select_one('[data-cy="listing-item-title"]') else "")
+            if not titulo:
+                titulo = _limpar(link_el.get("title") or link_el.get_text(" ", strip=True))
+            preco_el = (item.select_one('[data-cy="listing-item-price"]')
+                        or item.select_one('span:has(€)') or item.select_one('[class*="price"]'))
+            preco = extrair_preco(preco_el.get_text(" ", strip=True) if preco_el else None)
+            if preco is None:
+                preco = extrair_preco(item.get_text(" ", strip=True))
+            if preco is None:
+                continue
+            local_el = item.select_one('[data-cy="advert-card-address"]')
+            local = local_el.get_text(" ", strip=True) if local_el else ""
+            desc = _limpar(local)
+            img = ""
+            img_el = item.find("img")
+            if img_el:
+                img = img_el.get("src") or img_el.get("data-src") or img_el.get("data-lazy") or ""
+            texto_card = item.get_text(" ", strip=True)
+            data_texto = _imo_data_anuncio(texto_card)
+            disp = extrair_data_disponibilidade(titulo, texto_card)
+            an = _criar_anuncio(titulo, preco, link, data_texto, desc, img,
+                                "Imovirtual", cidade, disponibilidade=disp)
+            if an:
+                anuncios.append(an)
+        if len(anuncios) >= LIMITE_SCRAPE:
+            break
+    return anuncios
 
-    fonte_str = " + ".join(fontes_ativas)
-    CACHE[cidade] = {"anuncios": todas_fontes, "timestamp": agora, "fonte": fonte_str}
-    print(f"[Cache] {cidade}: {len(todas_fontes)} anuncios unicos | Fontes: {fonte_str}")
-    return todas_fontes, fonte_str
+
+CUSTOJUSTO_URLS = {
+    "porto": "https://www.custojusto.pt/porto/imobiliario/quartos",
+    "lisboa": "https://www.custojusto.pt/lisboa/imobiliario/quartos",
+    "coimbra": "https://www.custojusto.pt/coimbra/imobiliario/quartos",
+    "vila real": "https://www.custojusto.pt/vila-real/imobiliario/quartos",
+    "aveiro": "https://www.custojusto.pt/aveiro/imobiliario/quartos",
+    "braga": "https://www.custojusto.pt/braga/imobiliario/quartos",
+    "evora": "https://www.custojusto.pt/evora/imobiliario/quartos",
+    "algarve": "https://www.custojusto.pt/faro/imobiliario/quartos",
+}
+
+OLX_URLS = {
+    "porto": "https://www.olx.pt/imoveis/q-quarto-porto/",
+    "lisboa": "https://www.olx.pt/imoveis/q-quarto-lisboa/",
+    "coimbra": "https://www.olx.pt/imoveis/q-quarto-coimbra/",
+    "vila real": "https://www.olx.pt/imoveis/q-quarto-vila-real/",
+    "aveiro": "https://www.olx.pt/imoveis/q-quarto-aveiro/",
+    "braga": "https://www.olx.pt/imoveis/q-quarto-braga/",
+    "evora": "https://www.olx.pt/imoveis/q-quarto-evora/",
+    "algarve": "https://www.olx.pt/imoveis/q-quarto-faro/",
+}
+
+IDEALISTA_URLS = {
+    "porto": "https://www.idealista.pt/arrendar-quarto/porto/",
+    "lisboa": "https://www.idealista.pt/arrendar-quarto/lisboa/",
+    "coimbra": "https://www.idealista.pt/arrendar-quarto/coimbra/",
+    "vila real": "https://www.idealista.pt/arrendar-quarto/vila-real/",
+    "aveiro": "https://www.idealista.pt/arrendar-quarto/aveiro/",
+    "braga": "https://www.idealista.pt/arrendar-quarto/braga/",
+    "evora": "https://www.idealista.pt/arrendar-quarto/evora/",
+    "algarve": "https://www.idealista.pt/arrendar-quarto/faro/",
+}
 
 
-# =============================================================================
-# FLASK APP
-# =============================================================================
+def _cj_str(v):
+    if v is None:
+        return ""
+    if isinstance(v, dict):
+        return v.get("name") or v.get("label") or ""
+    return str(v)
 
+
+def _cj_preco(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v >= 50 and v <= 5000 else None
+    p = extrair_preco(str(v))
+    return p if (p is not None and 50 <= p <= 5000) else None
+
+
+def _cj_data(v):
+    if isinstance(v, (int, float)):
+        ts = v / 1000.0 if v > 1e12 else v
+        try:
+            return datetime.fromtimestamp(ts).strftime("%d/%m/%Y")
+        except Exception:
+            return ""
+    s = _cj_str(v)
+    if not s:
+        return ""
+    # ISO '2026-08-04T10:14:55Z' -> '04/08/2026'
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        try:
+            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return dt.strftime("%d/%m/%Y")
+        except ValueError:
+            return ""
+    return s
+
+
+def scrape_custojusto(cidade, paginas=MAX_PAGES):
+    """Extrai anúncios do JSON embutido do Next.js (__NEXT_DATA__), N páginas × 30."""
+    cidade = _slug_cidade(cidade)
+    url = CUSTOJUSTO_URLS.get(_normalizar(cidade))
+    if not url:
+        return []
+    anuncios = []
+    vistos = set()
+    for pagina in range(1, paginas + 1):
+        u = url + (("?page=%d" % pagina) if pagina > 1 else "")
+        html = _obter(u)
+        if not html:
+            break
+        soup = BeautifulSoup(html, "lxml")
+        script = soup.find("script", id="__NEXT_DATA__")
+        if not script:
+            break
+        try:
+            dados = json.loads(script.string or script.get_text())
+        except (ValueError, TypeError):
+            break
+        page = (dados.get("props") or {}).get("pageProps") or {}
+        itens = page.get("listItems") or []
+        if not itens:
+            break
+        for it in itens[:MAX_CUSTOJUSTO]:
+            titulo = _cj_str(it.get("title"))
+            preco = _cj_preco(it.get("price"))
+            if not titulo or preco is None:
+                continue
+            link = _cj_str(it.get("url"))
+            if link.startswith("/"):
+                link = "https://www.custojusto.pt" + link
+            loc = it.get("locationNames") or {}
+            local = " ".join(str(v) for v in loc.values() if v)
+            corpo = _cj_str(it.get("body"))
+            desc = _limpar("%s %s" % (corpo, local))
+            img = _cj_str(it.get("imageFullURL"))
+            data_texto = _cj_data(it.get("listTime"))
+            chave = titulo + str(preco)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            disp = extrair_data_disponibilidade(titulo, corpo)
+            an = _criar_anuncio(titulo, preco, link, data_texto, desc, img,
+                                "CustoJusto", cidade, disponibilidade=disp)
+            if an:
+                anuncios.append(an)
+        if len(anuncios) >= LIMITE_SCRAPE:
+            break
+    return anuncios
+
+
+def _olx_data_texto(loc_date_texto):
+    """Extrai a data do OLX. 'Pedrouços - 23 de julho de 2026' → '23/07/2026';
+    também trata 'hoje', 'ontem' e 'há X dias'."""
+    if not loc_date_texto:
+        return ""
+    parte = loc_date_texto
+    if " - " in loc_date_texto:
+        parte = loc_date_texto.split(" - ", 1)[1]
+    t = _normalizar(parte)
+    if re.search(r"\bhoje\b", t):
+        return "Hoje"
+    if re.search(r"\bontem\b", t):
+        return "Ontem"
+    m = re.search(r"h[aá]\s+(\d+)\s*(dias?|horas?)", t)
+    if m:
+        return "há %s %s" % (m.group(1), m.group(2))
+    _ts, disp = _parse_data_pt(parte)
+    if disp:
+        return disp
+    return ""
+
+
+def _normaliza_url_olx(img):
+    if not img:
+        return ""
+    if img.startswith("/") or img.startswith("data:"):
+        return ""
+    if ";s=216x152;q=50" in img:
+        img = img.replace(";s=216x152;q=50", ";s=800x600;q=70")
+    else:
+        img = re.sub(r";s=\d+x\d+;q=\d+", ";s=800x600;q=70", img)
+    return img
+
+
+def _imagem_olx(img_el):
+    """Extrai a imagem real do card do OLX. O primeiro <img> usa lazy-load: o src
+    é um placeholder e a imagem verdadeira está no srcset. Ignora no_thumbnail."""
+    if not img_el:
+        return ""
+    srcset = img_el.get("srcset") or ""
+    if srcset:
+        urls = []
+        for parte in srcset.split(","):
+            parte = parte.strip()
+            if parte:
+                urls.append(parte.split()[0])
+        if urls:
+            # a última entrada costuma ser a maior resolução
+            img = _normaliza_url_olx(urls[-1])
+            if img:
+                return img
+    img = img_el.get("src") or img_el.get("data-src") or ""
+    return _normaliza_url_olx(img)
+
+
+def scrape_olx(cidade, paginas=MAX_PAGES):
+    """Scraping do OLX Portugal (quartos) — mesmo motor do Imovirtual, ativo.
+
+    Nota: o OLX partilha a plataforma do grupo com o Imovirtual; as páginas de
+    pesquisa respondem a pedidos normais (sem challenge de Cloudflare aqui)."""
+    cidade = _slug_cidade(cidade)
+    url = OLX_URLS.get(_normalizar(cidade))
+    if not url:
+        return []
+    anuncios = []
+    vistos = set()
+    for pagina in range(1, paginas + 1):
+        u = url + (("?page=%d" % pagina) if pagina > 1 else "")
+        html = _obter(u)
+        if not html:
+            break
+        soup = BeautifulSoup(html, "lxml")
+        cards = soup.select('[data-cy="l-card"]')
+        if not cards:
+            break
+        for card in cards:
+            link_el = card.select_one('a[href*="/anuncio/"]')
+            if not link_el:
+                continue
+            link = link_el.get("href", "") or ""
+            if link.startswith("/"):
+                link = "https://www.olx.pt" + link
+            title_el = card.select_one('[data-testid="ad-card-title"]')
+            titulo = title_el.get_text(" ", strip=True) if title_el else ""
+            if not titulo:
+                titulo = link_el.get("title") or link_el.get_text(" ", strip=True)
+            price_el = card.select_one('[data-testid="ad-price"]')
+            preco = extrair_preco(price_el.get_text(" ", strip=True) if price_el else None)
+            if preco is None:
+                preco = extrair_preco(card.get_text(" ", strip=True))
+            if preco is None:
+                continue
+            loc_date_el = card.select_one('[data-testid="location-date"]')
+            loc_date = loc_date_el.get_text(" ", strip=True) if loc_date_el else ""
+            data_texto = _olx_data_texto(loc_date)
+            local = loc_date.split(" - ")[0] if " - " in loc_date else loc_date
+            img = _imagem_olx(card.find("img"))
+            card_text = card.get_text(" ", strip=True)
+            disp = extrair_data_disponibilidade(titulo, card_text)
+            chave = _normalizar(titulo) + str(preco)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            an = _criar_anuncio(titulo, preco, link, data_texto, local, img,
+                                "OLX", cidade, disponibilidade=disp)
+            if an:
+                anuncios.append(an)
+        if len(anuncios) >= LIMITE_SCRAPE:
+            break
+    return anuncios
+
+
+def _idealista_html_com_playwright(url):
+    """Abre a página do Idealista num Chromium real (channel='chromium', que passa
+    o challenge do DataDome, ao contrário do headless-shell). Devolve o HTML final
+    ou None se Playwright não estiver disponível."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    html = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                channel="chromium",
+                args=["--disable-blink-features=AutomationControlled"])
+            ctx = browser.new_context(
+                locale="pt-PT",
+                user_agent=HEADERS["User-Agent"],
+                viewport={"width": 1366, "height": 900})
+            ctx.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # espera o DataDome resolver o challenge (o título deixa de ser a capa)
+            try:
+                page.wait_for_function(
+                    "document.title && !document.title.includes('idealista.pt')",
+                    timeout=30000)
+            except Exception:
+                pass
+            # fecha o banner de cookies se aparecer
+            try:
+                if page.locator("#didomi-notice-agree-button").count():
+                    page.locator("#didomi-notice-agree-button").click(timeout=4000)
+                    page.wait_for_timeout(1500)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+            html = page.content()
+            browser.close()
+    except Exception:
+        html = None
+    return html
+
+
+def _parse_idealista(html, cidade):
+    soup = BeautifulSoup(html, "lxml")
+    itens = soup.select("article.item")
+    anuncios = []
+    vistos = set()
+    for item in itens:
+        link_el = item.select_one('a.item-link[href*="/imovel/"]') or item.select_one("a.item-link")
+        if not link_el:
+            continue
+        link = link_el.get("href", "") or ""
+        if link.startswith("/"):
+            link = "https://www.idealista.pt" + link
+        titulo = _limpar(link_el.get("title") or link_el.get_text(" ", strip=True))
+        if not titulo:
+            h = item.find(["h1", "h2", "h3", "h4"])
+            titulo = _limpar(h.get_text(" ", strip=True) if h else "")
+        price_el = item.select_one(".item-price") or item.select_one(".price-row")
+        preco = extrair_preco(price_el.get_text(" ", strip=True) if price_el else None)
+        if preco is None:
+            continue
+        loc_el = item.select_one(".item-location")
+        loc = _limpar(loc_el.get_text(" ", strip=True)) if loc_el else ""
+        desc_el = item.select_one(".item-description")
+        desc = _limpar_descricao_idealista(desc_el.get_text(" ", strip=True)) if desc_el else ""
+        if not loc and not desc:
+            desc = titulo
+        img = ""
+        img_el = item.select_one(".item-multimedia img") or item.find("img")
+        if img_el:
+            # mantém o URL original (o '/blur/' devolve a miniatura válida)
+            img = img_el.get("src") or img_el.get("data-src") or ""
+        card_text = item.get_text(" ", strip=True)
+        disp = extrair_data_disponibilidade(titulo, card_text)
+        chave = _normalizar(titulo) + str(preco)
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        an = _criar_anuncio(titulo, preco, link, "", loc, img, "Idealista",
+                            cidade, disponibilidade=disp)
+        if an:
+            an["descricao"] = desc
+            anuncios.append(an)
+    return anuncios[:LIMITE_SCRAPE]
+
+
+def scrape_idealista(cidade, paginas=1):
+    """Idealista — bloqueado por DataDome CAPTCHA. Tenta obter via Playwright.
+
+    Ativar com ENABLE_IDEALISTA=1 + 'pip install playwright' + 'playwright install
+    chromium'. Se não estiver ativo/instalado, devolve [] (sem bloquear o site).
+    Como cada página exige abrir um browser, limita-se a min(paginas, 2) páginas."""
+    if not ENABLE_IDEALISTA:
+        return []
+    cidade = _slug_cidade(cidade)
+    base = IDEALISTA_URLS.get(_normalizar(cidade))
+    if not base:
+        return []
+    paginas = max(1, min(paginas, 2))
+    anuncios = []
+    vistos = set()
+    for pagina in range(1, paginas + 1):
+        url = base + (("?pagina=%d" % pagina) if pagina > 1 else "")
+        html = _idealista_html_com_playwright(url)
+        if not html or "datadome" in html.lower() or "enable JS" in html:
+            break
+        for an in _parse_idealista(html, cidade):
+            chave = (an["titulo"].lower(), an["preco"])
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            anuncios.append(an)
+        if len(anuncios) >= LIMITE_SCRAPE:
+            break
+    return anuncios
+
+
+def scrape_housinganywhere(cidade):
+    # Desativado — renderiza em JavaScript, requer Playwright/Camoufox
+    return []
+
+
+def scrape_spotahome(cidade):
+    # Desativado — renderiza em JavaScript, requer Playwright/Camoufox
+    return []
+
+
+FONTES_ATIVAS = {"Imovirtual": scrape_imovirtual,
+                 "OLX": scrape_olx,
+                 "CustoJusto": scrape_custojusto}
+if ENABLE_IDEALISTA:
+    FONTES_ATIVAS["Idealista"] = scrape_idealista
+
+
+def carregar_anuncios(cidade, paginas=2):
+    """Anúncios da cidade usando cache (TTL de 30 min), por cidade + profundidade.
+
+    Junta todos os anúncios das fontes (sem interleave) num pool comum; a ordenação
+    e o limite final são aplicados na rota. Guarda até LIMITE_SCRAPE por cache."""
+    cidade = _slug_cidade(cidade)
+    chave = "%s|%d" % (cidade, paginas)
+    agora = time.time()
+    entrada = CACHE.get(chave)
+    if entrada and (agora - entrada["timestamp"]) < CACHE_TTL:
+        return entrada["anuncios"], entrada["fonte"], entrada["timestamp"]
+
+    brutos = []
+    fonte_usada = []
+    for nome, func in FONTES_ATIVAS.items():
+        try:
+            lista = func(cidade, paginas)
+        except Exception:
+            lista = []
+        if lista:
+            fonte_usada.append(nome)
+            brutos.append(lista)
+
+    # deduplica por (título normalizado, preço) e junta tudo
+    merged = []
+    vistos = set()
+    for lista in brutos:
+        for an in lista:
+            chave_d = (an["titulo"].lower(), an["preco"])
+            if chave_d in vistos:
+                continue
+            vistos.add(chave_d)
+            merged.append(an)
+        if len(merged) >= LIMITE_SCRAPE:
+            break
+    merged = merged[:LIMITE_SCRAPE]
+
+    # se nenhuma fonte retornou anúncios, não guarda em cache (para tentar de novo)
+    if not merged:
+        return [], fonte_usada, agora
+
+    CACHE[chave] = {"anuncios": merged, "timestamp": agora, "fonte": fonte_usada}
+    return merged, fonte_usada, agora
+
+
+def invalidar_cache(cidade, paginas=None):
+    cidade = _slug_cidade(cidade)
+    if paginas is not None:
+        CACHE.pop("%s|%d" % (cidade, paginas), None)
+    else:
+        for k in list(CACHE):
+            if k.startswith(cidade + "|"):
+                CACHE.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# Flask app + template
+# ---------------------------------------------------------------------------
 app = Flask(__name__)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+
+def _aplicar_filtros(anuncios, cidade, faculdade, preco_min, preco_max, dist_max,
+                     seg_min, tranquilo_min, com_min):
+    """Aplica filtros. Nos três casos 'quanto mais alto, melhor':
+    seguranca >= seg_min, tranquilidade (=10 - ruido) >= tranquilo_min, comercio >= com_min."""
+    zona_map = ZONA_BY_NOME.get(cidade, {})
+    resultado = []
+    for a in anuncios:
+        if preco_min is not None and a["preco"] < preco_min:
+            continue
+        if preco_max is not None and a["preco"] > preco_max:
+            continue
+        z = zona_map.get(a["zona"]) if a["zona"] else None
+        seg = z["seguranca"] if z else None
+        rui = z["ruido"] if z else None
+        tranquilo = (10 - rui) if rui is not None else None
+        com = z["comercio"] if z else None
+        if seg_min is not None and (seg is None or seg < seg_min):
+            continue
+        if tranquilo_min is not None and (tranquilo is None or tranquilo < tranquilo_min):
+            continue
+        if com_min is not None and (com is None or com < com_min):
+            continue
+        dist = calcular_distancia_faculdade(a["lat"], a["lon"], faculdade, cidade)
+        if dist_max is not None and (dist is None or dist > dist_max):
+            continue
+        item = dict(a)
+        item["distancia"] = dist
+        item["seguranca"] = seg
+        item["ruido"] = rui
+        item["tranquilo"] = tranquilo
+        item["comercio"] = com
+        item["metro_min"] = z["metro_min"] if z else None
+        item["bus_min"] = z["bus_min"] if z else None
+        item["comboio_min"] = z["comboio_min"] if z else None
+        resultado.append(item)
+    return resultado
+
+
+def _ordenar(anuncios, ordenar, faculdade, cidade):
+    if ordenar == "preco_asc":
+        anuncios.sort(key=lambda a: (a["preco"], a["data_ts"]))
+    elif ordenar == "preco_desc":
+        anuncios.sort(key=lambda a: (a["preco"], a["data_ts"]), reverse=True)
+    elif ordenar == "distancia":
+        anuncios.sort(key=lambda a: (a["distancia"] if a["distancia"] is not None else 1e9,
+                                     a["data_ts"]))
+    elif ordenar == "seguranca":
+        anuncios.sort(key=lambda a: (a["seguranca"] if a["seguranca"] is not None else -1,
+                                     a["data_ts"]), reverse=True)
+    elif ordenar == "ruido_asc":
+        anuncios.sort(key=lambda a: (a["ruido"] if a["ruido"] is not None else 11,
+                                     a["data_ts"]))
+    elif ordenar == "comercio":
+        anuncios.sort(key=lambda a: (a["comercio"] if a["comercio"] is not None else -1,
+                                     a["data_ts"]), reverse=True)
+    else:
+        anuncios.sort(key=lambda a: a["data_ts"], reverse=True)
+
+
+def _balanceado(anuncios, limite):
+    """Garante uma mistura de fontes: cada fonte contribui no máximo quota
+    anúncios (os melhores segundo a ordenação já aplicada). Evita que uma única
+    fonte domine e que outras desapareçam dos resultados."""
+    if len(anuncios) <= limite:
+        return anuncios
+    por_fonte = {}
+    for a in anuncios:
+        por_fonte.setdefault(a["fonte"], []).append(a)
+    n = len(por_fonte)
+    quota = max(1, limite // n)
+    selecionados = []
+    for lista in por_fonte.values():
+        selecionados.extend(lista[:quota])
+    return selecionados[:limite]
+
+
+def _float(v):
+    try:
+        return float(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(v):
+    try:
+        return int(float(v)) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+HTML_TEMPLATE = """<!doctype html>
 <html lang="pt">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>UniCasa - Quartos para Estudantes</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        :root {
-            --primary: #2c5282; --primary-light: #4299e1; --accent: #ed8936;
-            --bg: #f7fafc; --card-bg: #ffffff; --text: #2d3748;
-            --text-muted: #718096; --border: #e2e8f0;
-        }
-        * { box-sizing: border-box; }
-        body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; line-height: 1.6; }
-        .navbar {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
-            padding: 1rem 0; box-shadow: 0 2px 15px rgba(44,82,130,0.25);
-        }
-        .navbar-brand { font-size: 1.6rem; font-weight: 700; color: #fff !important; }
-        .navbar-brand span { color: var(--accent); }
-        .stats-bar { background: #fff; border-bottom: 1px solid var(--border); padding: 0.75rem 0; }
-        .filter-card {
-            background: var(--card-bg); border-radius: 14px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06); padding: 1.5rem; margin-bottom: 1.5rem;
-        }
-        .form-label { font-weight: 600; font-size: 0.875rem; color: var(--text-muted); }
-        .form-select, .form-control {
-            border: 2px solid var(--border); border-radius: 10px;
-            padding: 0.625rem 1rem; font-size: 0.95rem; transition: all 0.2s;
-        }
-        .form-select:focus, .form-control:focus {
-            border-color: var(--primary-light); box-shadow: 0 0 0 3px rgba(66,153,225,0.15);
-        }
-        .btn-primary {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
-            border: none; border-radius: 10px; padding: 0.625rem 1.5rem;
-            font-weight: 600; transition: transform 0.15s, box-shadow 0.15s;
-        }
-        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(44,82,130,0.3); }
-        .room-card {
-            background: var(--card-bg); border-radius: 16px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06); border: 1px solid var(--border);
-            overflow: hidden; transition: transform 0.2s, box-shadow 0.2s;
-            height: 100%; display: flex; flex-direction: column;
-        }
-        .room-card:hover { transform: translateY(-4px); box-shadow: 0 12px 30px rgba(0,0,0,0.1); }
-        .card-img-top { height: 180px; object-fit: cover; background: linear-gradient(135deg, #e2e8f0 0%, #cbd5e0 100%); }
-        .card-body { padding: 1.25rem; flex: 1; display: flex; flex-direction: column; }
-        .price-tag { font-size: 1.5rem; font-weight: 800; color: var(--primary); }
-        .price-tag small { font-size: 0.85rem; font-weight: 500; color: var(--text-muted); }
-        .badge-source { font-size: 0.7rem; font-weight: 600; padding: 0.35rem 0.65rem; border-radius: 20px; }
-        .badge-imovirtual { background: #fef3c7; color: #92400e; }
-        .badge-custojusto { background: #dbeafe; color: #1e40af; }
-        .badge-housinganywhere { background: #d1fae5; color: #065f46; }
-        .badge-spotahome { background: #fce7f3; color: #9d174d; }
-        .badge-uniplaces { background: #dcfce7; color: #166534; }
-        .badge-erasmusinn { background: #f3e8ff; color: #6b21a8; }
-        .badge-demo { background: #f3e8ff; color: #6b21a8; }
-        .badge-imovirtual { background: #fef3c7; color: #92400e; }
-        .badge-custojusto { background: #dbeafe; color: #1e40af; }
-        .badge-uniplaces { background: #dcfce7; color: #166534; }
-        .badge-erasmusinn { background: #f3e8ff; color: #6b21a8; }
-        .badge-demo { background: #f3e8ff; color: #6b21a8; }
-        .distancia-box {
-            background: linear-gradient(135deg, #ebf8ff 0%, #e6fffa 100%);
-            border-radius: 10px; padding: 0.5rem 0.75rem; margin: 0.5rem 0;
-            font-size: 0.875rem; font-weight: 600; color: var(--primary);
-        }
-        .distancia-box .numero { font-size: 1.1rem; }
-        .zona-notas { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px dashed var(--border); }
-        .nota-item { display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; padding: 0.2rem 0; }
-        .nota-label { color: var(--text-muted); }
-        .nota-stars { letter-spacing: 1px; }
-        .nota-boa { color: #38a169; }
-        .nota-media { color: #d69e2e; }
-        .nota-mau { color: #e53e3e; }
-        .transp-box { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.25rem; margin-top: 0.5rem; font-size: 0.7rem; }
-        .transp-item { text-align: center; padding: 0.25rem; border-radius: 6px; background: #f7fafc; }
-        .transp-item .valor { font-weight: 700; color: var(--primary); }
-        .btn-ver-anuncio {
-            display: block; width: 100%;
-            background: linear-gradient(135deg, var(--accent) 0%, #dd6b20 100%);
-            color: #fff; border: none; border-radius: 10px; padding: 0.75rem;
-            font-weight: 700; font-size: 0.95rem; text-decoration: none;
-            text-align: center; margin-top: auto; transition: all 0.2s;
-        }
-        .btn-ver-anuncio:hover { color: #fff; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(237,137,54,0.35); }
-        .alert-info-custom { background: linear-gradient(135deg, #ebf8ff 0%, #e6fffa 100%); border: 1px solid #90cdf4; border-radius: 12px; color: #2c5282; }
-        .alert-warning-custom { background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%); border: 1px solid #f6e05e; border-radius: 12px; color: #744210; }
-        .empty-state { text-align: center; padding: 3rem 1rem; color: var(--text-muted); }
-        .form-range { margin-top: 0.25rem; }
-        .form-range + output { font-size: 0.8rem; margin-left: 0.5rem; vertical-align: middle; }
-        .fonte-badge { font-size: 0.75rem; padding: 0.25rem 0.5rem; border-radius: 6px; margin-right: 0.5rem; }
-        @media (max-width: 768px) {
-            .filter-card .row > div { margin-bottom: 0.75rem; }
-            .price-tag { font-size: 1.25rem; }
-        }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aloja-Te — Encontra quarto sem complicações</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  :root{
+    --grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 45%,#a855f7 100%);
+    --grad-suave:linear-gradient(135deg,#eef2ff,#f5f3ff);
+    --primario:#6366f1; --primario-escuro:#4f46e5; --violeta:#8b5cf6;
+    --laranja:#fb923c; --laranja-escuro:#f97316;
+    --fundo:#f6f7fe; --texto:#334155; --texto-suave:#64748b;
+    --sombra:0 .3rem 1.2rem rgba(99,102,241,.10);
+    --sombra-hover:0 .7rem 1.6rem rgba(139,92,246,.20);
+  }
+  body{background:var(--fundo);color:var(--texto);}
+  .navbar-unicasa{background:var(--grad);box-shadow:0 .25rem 1rem rgba(139,92,246,.25);}
+  .navbar-unicasa .navbar-brand{letter-spacing:.3px;}
+  .brand-casa{color:#ffd166;font-weight:800;}
+  .stats-bar{background:#fff;border:1px solid #e9e8fb;border-radius:.75rem;font-size:.85rem;color:var(--texto);box-shadow:var(--sombra);}
+  .filter-card{background:#fff;border:none;box-shadow:var(--sombra);border-radius:1rem;}
+  .slider-val{font-weight:700;color:var(--primario);}
+  .card-ad{border:none;box-shadow:var(--sombra);border-radius:1rem;transition:transform .18s ease,box-shadow .18s ease;overflow:hidden;}
+  .card-ad:hover{transform:translateY(-4px);box-shadow:var(--sombra-hover);}
+  .ad-img{height:150px;width:100%;object-fit:cover;background:#e9eefb;}
+  .ad-img-ph{height:150px;width:100%;display:flex;align-items:center;justify-content:center;background:var(--grad-suave);}
+  .badge-fonte{position:absolute;top:.45rem;left:.45rem;padding:.2rem .5rem;border-radius:.5rem;font-size:.68rem;font-weight:700;box-shadow:0 .15rem .4rem rgba(0,0,0,.2);}
+  .badge-data{position:absolute;top:.45rem;right:.45rem;background:rgba(30,27,75,.65);color:#fff;padding:.2rem .5rem;border-radius:.5rem;font-size:.68rem;backdrop-filter:blur(2px);}
+  .ad-titulo{font-weight:700;font-size:.95rem;color:#1e1b4b;min-height:2.5rem;}
+  .ad-preco{font-size:1.35rem;font-weight:800;color:var(--primario-escuro);}
+  .ad-preco small{font-size:.8rem;color:var(--texto-suave);font-weight:500;}
+  .dist-box{background:linear-gradient(90deg,#eef2ff,#ede9fe);border-radius:.5rem;padding:.3rem .55rem;font-size:.78rem;font-weight:600;color:var(--primario-escuro);}
+  .ad-desc{font-size:.8rem;color:var(--texto-suave);}
+  .zona-notas{border:1px dashed #d8d5f6;border-radius:.6rem;padding:.5rem .6rem;background:#fbfaff;}
+  .nota-boa{color:#16a34a;font-weight:700;}
+  .nota-media{color:#d97706;font-weight:700;}
+  .nota-mau{color:#dc2626;font-weight:700;}
+  .transporte-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.25rem;font-size:.74rem;color:var(--texto-suave);}
+  .notas-icones{display:flex;justify-content:space-between;gap:.5rem;}
+  .nota-icone{display:inline-flex;align-items:center;gap:.25rem;font-size:.8rem;font-weight:600;}
+  .nota-icone i{font-style:normal;}
+  .btn-laranja{background:linear-gradient(90deg,#fb923c,#f97316);border:none;color:#fff;font-weight:700;}
+  .btn-laranja:hover{background:linear-gradient(90deg,#f97316,#ea580c);color:#fff;transform:translateY(-1px);box-shadow:0 .3rem .8rem rgba(249,115,22,.35);}
+  .badge-zona{background:#eef2ff;color:var(--primario-escuro);font-size:.72rem;font-weight:600;}
+  .fontes-legend{font-size:.78rem;color:var(--texto-suave);}
+  .fontes-legend .dot{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;margin-right:.25rem;vertical-align:middle;}
+  footer{font-size:.85rem;color:var(--texto-suave);}
+</style>
 </head>
 <body>
-    <nav class="navbar">
-        <div class="container">
-            <a class="navbar-brand" href="/">Uni<span>Casa</span></a>
-            <span style="color:rgba(255,255,255,0.8);font-size:0.9rem;">Busca Inteligente para Estudantes</span>
-        </div>
-    </nav>
+<nav class="navbar navbar-expand-lg navbar-dark navbar-unicasa mb-3">
+  <div class="container">
+    <a class="navbar-brand fw-bold fs-4" href="{{ url_for('index') }}">Aloja<span class="brand-casa">-Te</span></a>
+    <span class="navbar-text text-white d-none d-md-inline" style="font-size:1rem;font-weight:500;opacity:.95;border-left:2px solid rgba(255,255,255,.4);padding-left:.75rem;">Encontra quarto sem complicações</span>
+  </div>
+</nav>
 
-    {% if fonte and 'demonstracao' in fonte.lower() %}
-    <div class="alert-warning-custom py-2 text-center">
-        <strong>Modo de Demonstracao ativo</strong> — Nao foi possivel carregar dados reais.
-        <a href="/refresh?cidade={{ cidade_sel }}" class="text-decoration-underline">Tentar novamente</a>
+<div class="container pb-5">
+
+  <div class="stats-bar d-flex flex-wrap justify-content-between align-items-center px-3 py-2 mb-3">
+    <span><strong>{{ total }}</strong> anúncios em <strong>{{ cidade }}</strong>{% if faculdade %} · {{ faculdade }}{% endif %}</span>
+    <span>Cache: {{ cache_min }} minutos · Atualizado: {{ atualizado }}</span>
+  </div>
+
+  {% if alerta %}
+  <div class="alert {{ alerta.classe }} d-flex justify-content-between align-items-center py-2">
+    <span>{{ alerta.texto }}</span>
+    <a href="{{ alerta.link }}" class="fw-bold text-decoration-underline">{{ alerta.acao }}</a>
+  </div>
+  {% endif %}
+
+  <!-- Filtros -->
+  <div class="card filter-card mb-4">
+    <div class="card-body">
+      <form method="get" action="{{ url_for('index') }}" id="filtros">
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label small" for="cidade">Cidade</label>
+            <select id="cidade" name="cidade" class="form-select form-select-sm">
+              {% for c in cidades %}<option value="{{ c }}" {% if c == cidade %}selected{% endif %}>{{ c }}</option>{% endfor %}
+              <option disabled>──────────────</option>
+              {% for c in cidades_extra %}<option value="{{ c }}" {% if c == cidade %}selected{% endif %}>{{ c }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="col-md-8">
+            <label class="form-label small" for="faculdade">Faculdade (para distância)</label>
+            <select id="faculdade" name="faculdade" class="form-select form-select-sm">
+              <option value="">— Todas / sem referência —</option>
+              {% for g in universidades_grupos %}
+              <optgroup label="{{ g.cidade }}">
+                {% for f in g.faculdades %}<option value="{{ f.nome }}" data-cidade="{{ g.cidade }}" {% if f.nome == faculdade %}selected{% endif %}>{{ f.nome }}</option>{% endfor %}
+              </optgroup>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="row g-3 mt-0">
+          <div class="col-md-2">
+            <label class="form-label small" for="preco_min">Preço mín (€)</label>
+            <input type="number" id="preco_min" name="preco_min" class="form-control form-control-sm" min="0" step="10" value="{{ preco_min or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="preco_max">Preço máx (€)</label>
+            <input type="number" id="preco_max" name="preco_max" class="form-control form-control-sm" min="0" step="10" value="{{ preco_max or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small" for="dist_max">Dist. máx à faculdade (km, linha reta)</label>
+            <input type="number" id="dist_max" name="dist_max" class="form-control form-control-sm" min="0" step="0.1" value="{{ dist_max or '' }}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="paginas">Profundidade de pesquisa</label>
+            <select id="paginas" name="paginas" class="form-select form-select-sm">
+              <option value="2" {% if paginas == 2 %}selected{% endif %}>Padrão (2 páginas)</option>
+              <option value="5" {% if paginas == 5 %}selected{% endif %}>Aprofundado (5 páginas)</option>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="ordenar">Ordenar por</label>
+            <select id="ordenar" name="ordenar" class="form-select form-select-sm">
+              <option value="" {% if not ordenar %}selected{% endif %}>Mais recentes</option>
+              <option value="preco_asc" {% if ordenar == 'preco_asc' %}selected{% endif %}>Preço: Baixo → Alto</option>
+              <option value="preco_desc" {% if ordenar == 'preco_desc' %}selected{% endif %}>Preço: Alto → Baixo</option>
+              <option value="distancia" {% if ordenar == 'distancia' %}selected{% endif %}>Distância à faculdade</option>
+              <option value="seguranca" {% if ordenar == 'seguranca' %}selected{% endif %}>Segurança (melhor)</option>
+              <option value="ruido_asc" {% if ordenar == 'ruido_asc' %}selected{% endif %}>Mais tranquilo</option>
+              <option value="comercio" {% if ordenar == 'comercio' %}selected{% endif %}>Mais comércio</option>
+            </select>
+          </div>
+        </div>
+        <div class="row g-3 mt-0 align-items-center">
+          <div class="col-md-3">
+            <label class="form-label small d-flex justify-content-between">
+              <span>Segurança mín.</span><span id="seg-val" class="slider-val">{{ seg_min or 0 }}</span>
+            </label>
+            <input type="range" id="seguranca_min" name="seg_min" class="form-range" min="0" max="10" step="1" value="{{ seg_min or 0 }}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small d-flex justify-content-between" title="Quanto mais alto, menos ruído">
+              <span>Ruído mín.</span><span id="tra-val" class="slider-val">{{ tranquilo_min if tranquilo_min is not none else 0 }}</span>
+            </label>
+            <input type="range" id="tranquilo_min" name="tranquilo_min" class="form-range" min="0" max="10" step="1" value="{{ tranquilo_min if tranquilo_min is not none else 0 }}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small d-flex justify-content-between">
+              <span>Comércio mín.</span><span id="com-val" class="slider-val">{{ com_min or 0 }}</span>
+            </label>
+            <input type="range" id="comercio_min" name="com_min" class="form-range" min="0" max="10" step="1" value="{{ com_min or 0 }}">
+          </div>
+          <div class="col-md-3 d-grid">
+            <button type="submit" class="btn btn-laranja btn-sm py-2">🔍 Filtrar</button>
+          </div>
+        </div>
+      </form>
     </div>
-    {% elif fonte %}
-    <div class="alert-info-custom py-2 text-center">
-        <strong>Fontes ativas: {{ fonte }}</strong> —
-        <a href="/refresh?cidade={{ cidade_sel }}" class="text-decoration-underline">Atualizar agora</a>
-    </div>
-    {% endif %}
+  </div>
 
-    <div class="stats-bar">
-        <div class="container d-flex justify-content-between align-items-center flex-wrap">
-            <span><strong>{{ total }}</strong> anuncios em <strong>{{ cidade_sel }}</strong></span>
-            <span class="text-muted" style="font-size:0.85rem;">Cache: 15 minutos | Atualizado: {{ agora }}</span>
+  <!-- Legenda de fontes -->
+  <div class="fontes-legend mb-3">
+    <span><span class="dot" style="background:#ecc94b"></span>Imovirtual</span>
+    <span class="ms-3"><span class="dot" style="background:#e53e3e"></span>OLX</span>
+    <span class="ms-3"><span class="dot" style="background:#4299e1"></span>CustoJusto</span>
+    <span class="ms-3"><span class="dot" style="background:#2f855a"></span>Idealista</span>
+  </div>
+
+  {% if anuncios %}
+  <div class="row g-4">
+    {% for a in anuncios %}
+    <div class="col-sm-6 col-lg-4 col-xl-3">
+      <div class="card card-ad h-100">
+        <div style="position:relative;">
+          {% if a.imagem %}
+          <img src="{{ a.imagem }}" class="ad-img" alt="Foto" onerror="this.outerHTML='<div class=&quot;ad-img-ph&quot;>🏠</div>'">
+          {% else %}
+          <div class="ad-img-ph"><span style="font-size:2rem">🏠</span></div>
+          {% endif %}
+          <span class="badge-fonte" style="background:{{ fonte_cores[a.fonte] }}">{{ a.fonte }}</span>
+          <span class="badge-data">{{ a.data }}</span>
         </div>
-    </div>
-
-    <div class="container py-4">
-        <div class="filter-card">
-            <form method="GET" action="/" class="row g-3 align-items-end">
-                <!-- LINHA 1: Cidade + Faculdade -->
-                <div class="col-md-6">
-                    <label class="form-label">Cidade</label>
-                    <select name="cidade" class="form-select" id="cidadeSelect" onchange="atualizarFaculdades()">
-                        {% for c in cidades %}
-                        <option value="{{ c }}" {% if cidade_sel == c %}selected{% endif %}>{{ c }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-                <div class="col-md-6">
-                    <label class="form-label">Faculdade (para calcular distancia)</label>
-                    <select name="faculdade" class="form-select" id="faculdadeSelect">
-                        <option value="">-- Escolher faculdade --</option>
-                        {% for fac in faculdades %}
-                        <option value="{{ fac }}" {% if faculdade_sel == fac %}selected{% endif %}>{{ fac }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-
-                <!-- LINHA 2: Preco Min, Preco Max, Dist Max, Ordenar -->
-                <div class="col-md-3">
-                    <label class="form-label">Preco Min (EUR)</label>
-                    <input type="number" name="preco_min" class="form-control" placeholder="0"
-                           value="{{ preco_min or '' }}">
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label">Preco Max (EUR)</label>
-                    <input type="number" name="preco_max" class="form-control" placeholder="max"
-                           value="{{ preco_max or '' }}">
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label">Dist. Max (km)</label>
-                    <input type="number" name="dist_max" class="form-control" placeholder="km"
-                           value="{{ dist_max or '' }}" step="0.1">
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label">Ordenar por</label>
-                    <select name="ordenar" class="form-select">
-                        <option value="" {% if ordenar == '' %}selected{% endif %}>Mais recentes</option>
-                        <option value="preco_asc" {% if ordenar == 'preco_asc' %}selected{% endif %}>Preco: Baixo → Alto</option>
-                        <option value="preco_desc" {% if ordenar == 'preco_desc' %}selected{% endif %}>Preco: Alto → Baixo</option>
-                        <option value="distancia" {% if ordenar == 'distancia' %}selected{% endif %}>Distancia a faculdade</option>
-                        <option value="seguranca" {% if ordenar == 'seguranca' %}selected{% endif %}>Seguranca (melhor)</option>
-                        <option value="ruido_asc" {% if ordenar == 'ruido_asc' %}selected{% endif %}>Menos ruido</option>
-                        <option value="comercio" {% if ordenar == 'comercio' %}selected{% endif %}>Mais comercio</option>
-                    </select>
-                </div>
-
-                <!-- LINHA 3: Seguranca, Ruido, Comercio, Botao -->
-                <div class="col-md-3">
-                    <label class="form-label">Seguranca minima (0-10)</label>
-                    <div class="d-flex align-items-center">
-                        <input type="range" name="seg_min" class="form-range flex-grow-1" min="0" max="10" step="1"
-                               value="{{ seg_min or '0' }}" oninput="this.nextElementSibling.value=this.value">
-                        <output class="badge bg-primary ms-2">{{ seg_min or '0' }}</output>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label">Ruido maximo (0-10)</label>
-                    <div class="d-flex align-items-center">
-                        <input type="range" name="ruido_max" class="form-range flex-grow-1" min="0" max="10" step="1"
-                               value="{{ ruido_max or '10' }}" oninput="this.nextElementSibling.value=this.value">
-                        <output class="badge bg-primary ms-2">{{ ruido_max or '10' }}</output>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label">Comercio minimo (0-10)</label>
-                    <div class="d-flex align-items-center">
-                        <input type="range" name="com_min" class="form-range flex-grow-1" min="0" max="10" step="1"
-                               value="{{ com_min or '0' }}" oninput="this.nextElementSibling.value=this.value">
-                        <output class="badge bg-primary ms-2">{{ com_min or '0' }}</output>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <button type="submit" class="btn btn-primary w-100" style="margin-top:1.5rem;">🔍 Filtrar</button>
-                </div>
-            </form>
-        </div>
-
-        {% if faculdade_sel %}
-        <div class="alert alert-info" style="border-radius:12px;">
-            <strong>Faculdade:</strong> {{ faculdade_sel }} ({{ cidade_sel }})
-            <span class="text-muted">| Distancia em linha reta (Haversine)</span>
-        </div>
-        {% endif %}
-
-        {% if anuncios %}
-        <div class="row g-4">
-            {% for a in anuncios %}
-            <div class="col-12 col-md-6 col-lg-4">
-                <div class="room-card">
-                    {% if a.imagem %}
-                    <img src="{{ a.imagem }}" class="card-img-top" alt="{{ a.titulo }}">
-                    {% else %}
-                    <div class="card-img-top d-flex align-items-center justify-content-center text-muted">
-                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                            <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path>
-                            <polyline points="9 22 9 12 15 12 15 22"></polyline>
-                        </svg>
-                    </div>
-                    {% endif %}
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-start mb-2">
-                            {% set fonte_key = a.fonte.lower().replace(' ', '').replace('.', '') if a.fonte else 'demo' %}
-                            <span class="badge badge-{{ fonte_key }}">
-                                {{ a.fonte or 'Desconhecida' }}
-                            </span>
-                            <span class="text-muted" style="font-size:0.75rem;">{{ a.data or '' }}</span>
-                        </div>
-                        <h5 class="card-title" style="font-size:1rem;font-weight:700;line-height:1.4;">{{ a.titulo or 'Sem titulo' }}</h5>
-                        <div class="price-tag">{{ "%.0f"|format(a.preco) }} <small>EUR/mes</small></div>
-                        {% if a.disponivel %}
-                        <div class="mt-1" style="font-size:0.8rem;">
-                            <span class="badge bg-success">{{ a.disponivel }}</span>
-                        </div>
-                        {% endif %}
-                        {% if a.zona %}
-                        <span class="badge bg-light text-dark border" style="font-size:0.75rem;">{{ a.zona }}</span>
-                        {% endif %}
-                        {% if a.distancia is not none %}
-                        <div class="distancia-box">
-                            Distancia a <strong>{{ faculdade_sel }}</strong>:
-                            <span class="numero">{{ a.distancia }} km</span>
-                        </div>
-                        {% endif %}
-                        <p class="card-text text-muted" style="font-size:0.85rem;margin-top:0.5rem;">
-                            {{ a.descricao[:140] }}{% if a.descricao|length > 140 %}...{% endif %}
-                        </p>
-                        {% if a.zona and a.zona in zonas %}
-                        <div class="zona-notas">
-                            {% set zn = zonas[a.zona] %}
-                            <div class="nota-item"><span class="nota-label">Seguranca</span>
-                                <span class="nota-stars {{ badge_nota(zn.seguranca) }}">{{ estrelas_html(zn.seguranca) }}</span></div>
-                            <div class="nota-item"><span class="nota-label">Ruido</span>
-                                <span class="nota-stars {{ badge_nota(zn.ruido) }}">{{ estrelas_html(zn.ruido) }}</span></div>
-                            <div class="nota-item"><span class="nota-label">Comercio</span>
-                                <span class="nota-stars {{ badge_nota(zn.comercio) }}">{{ estrelas_html(zn.comercio) }}</span></div>
-                            <div class="transp-box">
-                                <div class="transp-item"><div>Metro</div><div class="valor">{{ zn.metro_min }}m</div></div>
-                                <div class="transp-item"><div>Bus</div><div class="valor">{{ zn.bus_min }}m</div></div>
-                                <div class="transp-item"><div>Comboio</div><div class="valor">{{ zn.comboio_min }}m</div></div>
-                            </div>
-                        </div>
-                        {% endif %}
-                        {% if a.link and a.link != '#' %}
-                        <a href="{{ a.link }}" target="_blank" rel="noopener" class="btn-ver-anuncio mt-3">🔗 Ver Anuncio Original</a>
-                        {% endif %}
-                    </div>
-                </div>
+        <div class="card-body d-flex flex-column" style="padding:.85rem;">
+          <h6 class="ad-titulo">{{ a.titulo }}</h6>
+          <div class="ad-preco">{{ '%.0f' % a.preco }} € <small>/ mês</small></div>
+          {% if a.disponibilidade %}
+          <span class="badge text-bg-success mt-1 align-self-start">{{ a.disponibilidade }}</span>
+          {% endif %}
+          <div class="d-flex gap-2 mt-1 flex-wrap">
+            <span class="badge badge-zona">📍 {{ a.zona or 'Zona não identificada' }}</span>
+            {% if a.distancia is not none %}
+            <span class="badge text-bg-info dist-badge">🚶 {{ a.distancia }} km</span>
+            {% endif %}
+          </div>
+          {% if a.distancia is not none %}
+          <div class="dist-box mt-2">Distância a {{ faculdade or 'faculdade' }}: {{ a.distancia }} km <span style="font-weight:500;opacity:.75">(linha reta)</span></div>
+          {% endif %}
+          <p class="ad-desc mt-2 mb-0">{{ a.descricao }}</p>
+          {% if a.zona %}
+          <div class="zona-notas mt-3">
+            <div class="notas-icones">
+              <span class="nota-icone" title="Segurança"><i>🛡️</i>
+                <span class="{{ badge_nota(a.seguranca) }}">{{ a.seguranca if a.seguranca is not none else '—' }}/10</span></span>
+              <span class="nota-icone" title="Ruído (mais alto = mais sossegado)"><i>🤫</i>
+                <span class="{{ badge_nota(a.tranquilo) }}">{{ a.tranquilo if a.tranquilo is not none else '—' }}/10</span></span>
+              <span class="nota-icone" title="Comércio"><i>🛒</i>
+                <span class="{{ badge_nota(a.comercio) }}">{{ a.comercio if a.comercio is not none else '—' }}/10</span></span>
             </div>
-            {% endfor %}
+            <div class="transporte-grid mt-2">
+              {% if a.metro_min is not none %}<span>Metro {{ a.metro_min }}m</span>{% endif %}
+              {% if a.bus_min is not none %}<span>Bus {{ a.bus_min }}m</span>{% endif %}
+              {% if a.comboio_min is not none %}<span>Comboio {{ a.comboio_min }}m</span>{% endif %}
+            </div>
+          </div>
+          {% endif %}
+          <div class="mt-auto pt-3">
+            <a href="{{ a.link }}" target="_blank" rel="noopener" class="btn btn-laranja btn-sm w-100">🔗 Ver Anúncio Original</a>
+          </div>
         </div>
-        {% else %}
-        <div class="empty-state">
-            <h4>Nenhum anuncio encontrado</h4>
-            <p>Tenta ajustar os filtros ou <a href="/refresh?cidade={{ cidade_sel }}">atualizar os dados</a>.</p>
-        </div>
-        {% endif %}
+      </div>
     </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="text-center py-5 placeholder-msg">
+    <p style="font-size:3rem">🔍</p>
+    <h5>Nenhum anúncio corresponde aos filtros.</h5>
+    <a href="{{ url_for('refresh', cidade=cidade) }}" class="btn btn-outline-primary mt-2">Atualizar agora</a>
+  </div>
+  {% endif %}
 
-    <footer class="text-center py-4 text-muted" style="border-top:1px solid var(--border);margin-top:2rem;">
-        <small>UniCasa — Busca Inteligente para Estudantes — Porto | Lisboa | Coimbra</small>
-    </footer>
+</div>
 
-    <script>
-    const faculdadesPorCidade = {{ faculdades_json | safe }};
-    const faculdadeSelecionadaAtual = "{{ faculdade_sel }}";
-    
-    function atualizarFaculdades() {
-        const cidade = document.getElementById('cidadeSelect').value;
-        const facSelect = document.getElementById('faculdadeSelect');
-        facSelect.innerHTML = '<option value="">-- Escolher faculdade --</option>';
-        if (faculdadesPorCidade[cidade]) {
-            faculdadesPorCidade[cidade].forEach(fac => {
-                const opt = document.createElement('option');
-                opt.value = fac;
-                opt.textContent = fac;
-                if (fac === faculdadeSelecionadaAtual) {
-                    opt.selected = true;
-                }
-                facSelect.appendChild(opt);
-            });
-        }
-    }
-    // Inicializar na pagina
-    document.addEventListener('DOMContentLoaded', function() {
-        atualizarFaculdades();
+<footer class="text-center py-4">
+  Aloja-Te — Encontra quarto sem complicações — Porto | Lisboa | Coimbra<br>
+  <span class="fontes-legend">Fontes: Imovirtual · OLX · CustoJusto{% if fonte_idealista %} · Idealista{% endif %} · Distâncias em linha reta (Haversine)</span>
+</footer>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const cidadeSel = document.getElementById('cidade');
+  const facSel = document.getElementById('faculdade');
+  const form = document.getElementById('filtros');
+
+  // mostra só as universidades da cidade selecionada
+  function filtrarFaculdades() {
+    const cidade = cidadeSel.value;
+    const o = facSel.selectedOptions[0];
+    if (o && o.dataset.cidade && o.dataset.cidade !== cidade) facSel.value = '';
+    facSel.querySelectorAll('optgroup').forEach(g => {
+      g.style.display = g.getAttribute('label') === cidade ? '' : 'none';
     });
-    </script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  }
+
+  cidadeSel.addEventListener('change', () => {
+    filtrarFaculdades();
+    form.submit();
+  });
+
+  facSel.addEventListener('change', () => form.submit());
+
+  filtrarFaculdades();
+
+  const bind = (id, saida) => {
+    const el = document.getElementById(id);
+    el.addEventListener('input', () => document.getElementById(saida).textContent = el.value);
+  };
+  bind('seguranca_min', 'seg-val');
+  bind('tranquilo_min', 'tra-val');
+  bind('comercio_min', 'com-val');
+});
+</script>
 </body>
 </html>
 """
 
+FONTE_CORES = {"Imovirtual": "#ecc94b", "OLX": "#e53e3e", "CustoJusto": "#4299e1",
+               "Idealista": "#2f855a"}
+
+
+@app.after_request
+def _no_cache(resp):
+    """Evita que o browser guarde versões antigas da página (resultados sempre atuais)."""
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
 @app.route("/")
 def index():
-    cidade_sel = request.args.get("cidade", "Porto").strip()
-    if cidade_sel not in CIDADES:
-        cidade_sel = "Porto"
+    cidade = _slug_cidade(request.args.get("cidade", "Porto"))
+    faculdade = (request.args.get("faculdade") or "").strip()
+    # se escolheu uma universidade, a cidade segue-a (dropdown global)
+    if faculdade:
+        fcity = _cidade_da_faculdade(faculdade)
+        if fcity:
+            cidade = fcity
+    preco_min = _float(request.args.get("preco_min"))
+    preco_max = _float(request.args.get("preco_max"))
+    dist_max = _float(request.args.get("dist_max"))
+    # ordenação por defeito: preço (baixo → alto). '' = "Mais recentes"
+    ordenar_raw = request.args.get("ordenar")
+    ordenar = ordenar_raw if ordenar_raw is not None else "preco_asc"
+    ordenar = ordenar.strip()
+    seg_min = _int(request.args.get("seg_min"))
+    tranquilo_min = _int(request.args.get("tranquilo_min"))
+    com_min = _int(request.args.get("com_min"))
+    # profundidade de pesquisa: 1..5 páginas por fonte (defeito 2)
+    paginas = max(1, min(_int(request.args.get("paginas")) or 2, 5))
 
-    faculdade_sel = request.args.get("faculdade", "").strip()
-    preco_min = request.args.get("preco_min", "", type=str)
-    preco_max = request.args.get("preco_max", "", type=str)
-    ordenar = request.args.get("ordenar", "")
-    seg_min = request.args.get("seg_min", "", type=str)
-    ruido_max = request.args.get("ruido_max", "", type=str)
-    com_min = request.args.get("com_min", "", type=str)
-    dist_max = request.args.get("dist_max", "", type=str)
+    anuncios, fontes, ts = carregar_anuncios(cidade, paginas)
+    anuncios = _aplicar_filtros(anuncios, cidade, faculdade, preco_min, preco_max,
+                                dist_max, seg_min, tranquilo_min, com_min)
+    _ordenar(anuncios, ordenar, faculdade, cidade)
+    anuncios = _balanceado(anuncios, MAX_TOTAL)
+    _ordenar(anuncios, ordenar, faculdade, cidade)
 
-    pmin = float(preco_min) if preco_min else None
-    pmax = float(preco_max) if preco_max else None
-    seg_min_v = int(seg_min) if seg_min else None
-    ruido_max_v = int(ruido_max) if ruido_max else None
-    com_min_v = int(com_min) if com_min else None
-    dist_max_v = float(dist_max) if dist_max else None
-
-    anuncios, fonte = carregar_anuncios(cidade_sel)
-    facs_cidade = list(CIDADES[cidade_sel].keys())
-
-    if faculdade_sel and faculdade_sel in CIDADES[cidade_sel]:
-        f = CIDADES[cidade_sel][faculdade_sel]
-        for a in anuncios:
-            lat = a.get("lat")
-            lon = a.get("lon")
-            if lat and lon:
-                a["distancia"] = round(haversine(lat, lon, f["lat"], f["lon"]), 1)
-            else:
-                a["distancia"] = None
-    else:
-        for a in anuncios:
-            a["distancia"] = None
-
-    zonas_cidade = ZONAS.get(cidade_sel, {})
-    filtrados = []
     for a in anuncios:
-        preco = a.get("preco")
-        if preco is None:
-            continue
-        if pmin is not None and preco < pmin:
-            continue
-        if pmax is not None and preco > pmax:
-            continue
+        a["descricao"] = a["descricao"][:140] + ("…" if len(a["descricao"]) > 140 else "")
 
-        zona = a.get("zona")
-        if zona and zona in zonas_cidade:
-            zd = zonas_cidade[zona]
-            if seg_min_v is not None and zd["seguranca"] < seg_min_v:
-                continue
-            if ruido_max_v is not None and zd["ruido"] > ruido_max_v:
-                continue
-            if com_min_v is not None and zd["comercio"] < com_min_v:
-                continue
+    if not fontes:
+        alerta = {"classe": "alert-warning",
+                  "texto": "Não foi possível carregar dados reais das fontes.",
+                  "acao": "Tentar novamente",
+                  "link": url_for("refresh", cidade=cidade, paginas=paginas)}
+    else:
+        alerta = {"classe": "alert-info",
+                  "texto": "Fontes ativas: %s" % (" + ".join(fontes) if fontes else "nenhuma"),
+                  "acao": "Atualizar agora",
+                  "link": url_for("refresh", cidade=cidade, paginas=paginas)}
 
-        dist = a.get("distancia")
-        if dist_max_v is not None:
-            if dist is None or dist > dist_max_v:
-                continue
+    if not anuncios:
+        alerta = {"classe": "alert-warning",
+                  "texto": "Nenhum anúncio disponível para esta pesquisa.",
+                  "acao": "Tentar novamente",
+                  "link": url_for("refresh", cidade=cidade, paginas=paginas)}
 
-        filtrados.append(a)
-
-    if ordenar == "preco_asc":
-        filtrados.sort(key=lambda x: x.get("preco", float("inf")))
-    elif ordenar == "preco_desc":
-        filtrados.sort(key=lambda x: x.get("preco", 0), reverse=True)
-    elif ordenar == "distancia":
-        filtrados.sort(key=lambda x: x.get("distancia") if x.get("distancia") is not None else float("inf"))
-    elif ordenar == "seguranca":
-        filtrados.sort(key=lambda x: zonas_cidade.get(x.get("zona"), {}).get("seguranca", 0), reverse=True)
-    elif ordenar == "ruido_asc":
-        filtrados.sort(key=lambda x: zonas_cidade.get(x.get("zona"), {}).get("ruido", 10))
-    elif ordenar == "comercio":
-        filtrados.sort(key=lambda x: zonas_cidade.get(x.get("zona"), {}).get("comercio", 0), reverse=True)
-
+    agora = datetime.fromtimestamp(ts)
     return render_template_string(
         HTML_TEMPLATE,
-        anuncios=filtrados,
-        total=len(filtrados),
-        fonte=fonte,
-        cidades=NOMES_CIDADES,
-        cidade_sel=cidade_sel,
-        faculdades=facs_cidade,
-        faculdade_sel=faculdade_sel,
-        faculdades_json=json.dumps({c: list(v.keys()) for c, v in CIDADES.items()}),
-        preco_min=preco_min,
-        preco_max=preco_max,
-        seg_min=seg_min,
-        ruido_max=ruido_max,
-        com_min=com_min,
-        dist_max=dist_max,
-        ordenar=ordenar,
-        zonas=zonas_cidade,
-        agora=datetime.now().strftime("%H:%M"),
-        estrelas_html=estrelas_html,
-        badge_nota=badge_nota,
+        cidades=CIDADES,
+        cidades_extra=CIDADES_EXTRA,
+        universidades_grupos=UNIVERSIDADES_GRUPOS,
+        cidade=cidade,
+        faculdade=faculdade,
+        preco_min=preco_min, preco_max=preco_max, dist_max=dist_max,
+        ordenar=ordenar, seg_min=seg_min, tranquilo_min=tranquilo_min, com_min=com_min,
+        paginas=paginas,
+        anuncios=anuncios, total=len(anuncios),
+        fonte_cores=FONTE_CORES, alerta=alerta, fonte_idealista=("Idealista" in fontes),
+        cache_min=CACHE_TTL // 60,
+        atualizado=agora.strftime("%H:%M:%S"),
+        estrelas_html=estrelas_html, badge_nota=badge_nota,
     )
 
 
 @app.route("/refresh")
 def refresh():
-    cidade = request.args.get("cidade", "Porto")
-    if cidade in CACHE:
-        CACHE[cidade] = {"anuncios": None, "timestamp": None, "fonte": None}
-    return f"""<script>window.location.href='/?cidade={cidade}';</script>"""
+    cidade = _slug_cidade(request.args.get("cidade", "Porto"))
+    paginas = request.args.get("paginas")
+    if paginas:
+        invalidar_cache(cidade, max(1, min(_int(paginas) or 2, 5)))
+    else:
+        invalidar_cache(cidade)
+    return redirect(url_for("index", cidade=cidade, paginas=paginas or 2))
 
 
 @app.route("/api/anuncios")
 def api_anuncios():
-    cidade = request.args.get("cidade", "Porto")
-    if cidade not in CIDADES:
-        return jsonify({"erro": "Cidade invalida"}), 400
-    anuncios, fonte = carregar_anuncios(cidade)
-    return jsonify({"cidade": cidade, "fonte": fonte, "total": len(anuncios), "anuncios": anuncios})
+    cidade = _slug_cidade(request.args.get("cidade", "Porto"))
+    faculdade = (request.args.get("faculdade") or "").strip()
+    ordenar = (request.args.get("ordenar") or "preco_asc").strip()
+    paginas = max(1, min(_int(request.args.get("paginas")) or 2, 5))
+    anuncios, fontes, _ts = carregar_anuncios(cidade, paginas)
+    anuncios = _aplicar_filtros(anuncios, cidade, faculdade,
+                                _float(request.args.get("preco_min")),
+                                _float(request.args.get("preco_max")),
+                                _float(request.args.get("dist_max")),
+                                _int(request.args.get("seg_min")),
+                                _int(request.args.get("tranquilo_min")),
+                                _int(request.args.get("com_min")))
+    _ordenar(anuncios, ordenar, faculdade, cidade)
+    anuncios = _balanceado(anuncios, MAX_TOTAL)
+    _ordenar(anuncios, ordenar, faculdade, cidade)
+    for a in anuncios:
+        a["distancia"] = calcular_distancia_faculdade(a["lat"], a["lon"], faculdade, cidade)
+    return jsonify({"cidade": cidade, "fontes": fontes, "paginas": paginas,
+                    "total": len(anuncios), "anuncios": anuncios})
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
+@app.route("/api/faculdades")
+def api_faculdades():
+    cidade = _slug_cidade(request.args.get("cidade", "Porto"))
+    return jsonify({"cidade": cidade, "faculdades": FACULDADES.get(cidade, [])})
+
+
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))
-    print("=" * 60)
-    print("  UniCasa - Agregador de Quartos para Estudantes")
-    print("  Cidades: Porto | Lisboa | Coimbra")
-    print("=" * 60)
-    print(f"  Faculdades: {sum(len(v) for v in CIDADES.values())} (total)")
-    print(f"  Zonas: {sum(len(v) for v in ZONAS.values())} (total)")
-    print(f"  Fontes: Imovirtual, CustoJusto, HousingAnywhere, Spotahome (Idealista/OLX bloqueados)")
-    print(f"  URL: http://0.0.0.0:{port}")
-    print("=" * 60)
-    app.run(host="0.0.0.0", port=port, debug=False)
+    print("Aloja-Te a correr em http://127.0.0.1:%d" % PORT)
+    app.run(host="0.0.0.0", port=PORT, debug=False)
