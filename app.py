@@ -217,7 +217,8 @@ CACHE = {
     "Lisboa": {"anuncios": None, "timestamp": None, "fonte": None},
     "Coimbra": {"anuncios": None, "timestamp": None, "fonte": None},
 }
-CACHE_TTL = 15 * 60
+CACHE_TTL = 30 * 60
+MAX_PAGES = 2
 MAX_PAGES = 5
 
 GEOCODER = Nominatim(user_agent="unicasa_app_v1")
@@ -378,14 +379,14 @@ def fetch_imovirtual_scraping(cidade, pagina=1):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
+        resp = requests.get(url, headers=headers, timeout=8)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
         anuncios = []
         container = soup.find("div", {"data-cy": "search.listing.organic"})
         if not container:
             container = soup
-        articles = container.find_all("article", limit=40)
+        articles = container.find_all("article", limit=25)
         zonas_cidade = ZONAS.get(cidade, {})
         for art in articles:
             try:
@@ -505,7 +506,7 @@ def fetch_custojusto_scraping(cidade, max_anuncios=40):
         "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=8)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
 
@@ -617,6 +618,17 @@ def fetch_erasmusinn_scraping(cidade, max_anuncios=20):
 # =============================================================================
 
 def fetch_housinganywhere(cidade, max_anuncios=20):
+    """HousingAnywhere — desativado (renderiza em JS)."""
+    return []
+
+
+# =============================================================================
+# WEB SCRAPING - SPOTAHOME (quartos verificados para estudantes)
+# =============================================================================
+
+def fetch_spotahome(cidade, max_anuncios=20):
+    """Spotahome — desativado (renderiza em JS)."""
+    return []
     """Extrai anuncios do HousingAnywhere - muito popular entre estudantes."""
     urls = {
         "Porto": "https://housinganywhere.com/Porto--Portugal",
@@ -634,7 +646,7 @@ def fetch_housinganywhere(cidade, max_anuncios=20):
         "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=8)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
 
@@ -742,7 +754,7 @@ def fetch_spotahome(cidade, max_anuncios=20):
         "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=8)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
 
@@ -977,6 +989,12 @@ def carregar_anuncios(cidade):
                 algum_adicionado = True
         if not algum_adicionado:
             break
+
+    # LIMITAR a 100 anuncios para economizar memoria no Render (512MB)
+    if len(todas_fontes) > 100:
+        todas_fontes = todas_fontes[:100]
+
+    fonte_str = " + ".join(fontes_ativas)
 
     fonte_str = " + ".join(fontes_ativas)
     CACHE[cidade] = {"anuncios": todas_fontes, "timestamp": agora, "fonte": fonte_str}
@@ -1447,7 +1465,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  Faculdades: {sum(len(v) for v in CIDADES.values())} (total)")
     print(f"  Zonas: {sum(len(v) for v in ZONAS.values())} (total)")
-    print(f"  Fontes: Imovirtual, CustoJusto, HousingAnywhere, Spotahome (Idealista/OLX bloqueados)")
+    print(f"  Fontes ativas: Imovirtual, CustoJusto (HousingAnywhere/Spotahome desativados — JS pesado | Idealista/OLX bloqueados)")
     print(f"  URL: http://0.0.0.0:{port}")
     print("=" * 60)
     app.run(host="0.0.0.0", port=port, debug=False)
